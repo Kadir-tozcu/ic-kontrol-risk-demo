@@ -19,6 +19,41 @@ from synthetic_data import generate_synthetic_data
 st.set_page_config(page_title="Ic Kontrol Risk Ajansi", page_icon="🛡️", layout="wide")
 st.markdown("""<style>.stApp{background:#f5f7fb}.block-container{padding-top:1.3rem;max-width:1500px}[data-testid=stMetric]{background:white;border:1px solid #e3e8f1;padding:14px;border-radius:12px}.sub{color:#667085;margin-top:-14px}</style>""", unsafe_allow_html=True)
 
+# Each prefix identifies a reason emitted by the original V3–V6 engine.
+# Keep zero-hit controls selectable so the review also covers negative results.
+AUDIT_CONTROLS = {
+    "Hareketsiz hesaplar": "Hesap en az ",
+    "İleri yaş grubu": "yas bandinda",
+    "En ileri yaş grubu": "yas veya uzerinde",
+    "Yüksek tutarlı işlemler": "Islem tutari ",
+    "Geçmiş ortalamanın yüksek katı": "Tutar tarihsel ortalamanin en az",
+    "Geçmiş ortalamanın orta katı": "Tutar tarihsel ortalamanin {ratio_medium}-{ratio_high} kati",
+    "Yeni alıcıya transfer": "Alici daha once kullanilmamis",
+    "Mesai dışı işlemler": "Islem mesai disi",
+    "Yeniden aktivasyon sonrası sık işlem": "Yeniden aktivasyon sonrasi kisa surede",
+    "Hareketsiz hesap ve ileri yaş": "Hareketsizlik ile ileri yas",
+    "Günlük transfer tutarı ve adedi": "Ayni gun toplam transfer",
+    "İleri yaşta yüksek günlük transfer": "yas uzeri musterinin ayni gun",
+    "Limit altında bölünmüş işlemler": "Kontrol limitinin hemen altinda",
+    "Aynı alıcıya seri transfer": "Ayni aliciya gun icinde",
+    "Yeni alıcıya ilk yüksek transfer": "Yeni aliciya ilk transfer",
+    "Gece iki saat içinde seri transfer": "Gece iki saatlik dilimde",
+    "Hareketsiz hesabın bakiyesinin boşaltılması": "Hareketsizlik sonrasi bakiyenin",
+    "Çok sayıda göndericiden ortak alıcıya transfer": "Ayni aliciya bir gunde",
+    "Profil dışı ülke veya para birimi": "Musteri profilinde olmayan",
+    "İptal edilen işlemle bağlantılı transfer": "Iptal edilen islemle",
+    "Ortak cihaz veya IP kullanımı": "Ayni cihaz veya IP",
+    "Personel ve müşteri işlem yoğunlaşması": "Personel belirli musterinin",
+    "İleri yaş ve yeni alıcı": "65+ yas ile yeni alici",
+    "İleri yaş ve gece işlemi": "70+ yas ile gece islemi",
+    "Hareketsizlik sonrası yeni alıcı": "Hareketsizlik sonrasi yeni alici",
+    "Hareketsizlik ve hesap boşaltma birleşik kuralı": "Hareketsizlik ve hesap bosaltma kombinasyonu",
+    "Ortak cihaz ve yeni alıcı": "Ortak cihaz/IP ile yeni alici",
+    "Seri transfer ve limit altında bölme": "Seri transfer ve limit alti",
+    "Profil dışı transfer ve yeni alıcı": "Profil disi ulke/para birimi ile yeni alici",
+}
+
+
 @st.cache_data(show_spinner=False)
 def sample(legacy=False):
     if legacy:
@@ -142,37 +177,52 @@ try:
     scored["risk_level"] = scored.risk_level.replace({"YÜKSEK":"YUKSEK","DÜŞÜK":"DUSUK"})
 except Exception as e:st.error(f"Dosya analiz edilemedi: {e}");st.stop()
 
+audit_choice = "Tüm işlemler"
+if not legacy:
+    audit_choice = st.sidebar.selectbox("Denetim seçimi", ["Tüm işlemler", *AUDIT_CONTROLS], key="audit_choice")
+    if audit_choice != "Tüm işlemler":
+        reason = AUDIT_CONTROLS[audit_choice].format(**store.DEFAULT_RULES)
+        total = len(scored)
+        scored = scored.loc[scored.risk_reasons.str.contains(reason, regex=False)].copy()
+        st.subheader(audit_choice)
+        st.caption(f"{total:,} işlem tarandı · {len(scored):,} eşleşme".replace(",", "."))
 case_rows=cases.load_cases(db);case_rows=case_rows[case_rows.transaction_id.isin(scored.transaction_id)];status_map=case_rows.set_index("transaction_id")["status"].to_dict() if len(case_rows) else {};scored["case_status"]=scored["transaction_id"].astype(str).map(status_map).fillna("Yeni")
 view=scored.copy()
 if role=="Görüntüleyen":view["customer_id"]=view["customer_id"].astype(str).map(lambda x:x[:3]+"***"+x[-2:])
 high=int((scored.risk_level=="YUKSEK").sum());closed=int(scored.case_status.isin(["Kapatıldı","Yanlış alarm"]).sum())
-for col,(label,value) in zip(st.columns(5),[("Toplam islem",len(scored)),("Yuksek risk",high),("Acik vaka",len(scored)-closed),("Kapatilan",closed),("Ortalama skor",f"{scored.risk_score.mean():.1f}/100")]):col.metric(label,value)
+for col,(label,value) in zip(st.columns(5),[("Toplam islem",len(scored)),("Yuksek risk",high),("Acik vaka",len(scored)-closed),("Kapatilan",closed),("Ortalama skor",f"{scored.risk_score.mean():.1f}/100" if len(scored) else "—")]):col.metric(label,value)
 
 names=["Risk panosu","Islem listesi","Vaka detayi","Yonetici raporu","Vaka asistani"]+(["Kural yonetimi","Sistem yonetimi"] if admin else []); tabs=dict(zip(names,st.tabs(names)))
 with tabs["Risk panosu"]:
-    l,r=st.columns(2)
-    with l:st.subheader("Risk dagilimi");st.bar_chart(scored.risk_level.value_counts(),horizontal=True,color="#d24b58")
-    with r:st.subheader("Vaka durumlari");st.bar_chart(scored.case_status.value_counts(),horizontal=True,color="#2457a7")
-    trend=scored.assign(gun=pd.to_datetime(scored.transaction_datetime).dt.date).groupby("gun").agg(Islem=("transaction_id","count"),Yuksek=("risk_level",lambda x:(x=="YUKSEK").sum()));st.subheader("Gunluk egilim");st.line_chart(trend)
+    if scored.empty:
+        st.info("Seçilen denetimde eşleşen işlem bulunmadı.")
+    else:
+        l,r=st.columns(2)
+        with l:st.subheader("Risk dagilimi");st.bar_chart(scored.risk_level.value_counts(),horizontal=True,color="#d24b58")
+        with r:st.subheader("Vaka durumlari");st.bar_chart(scored.case_status.value_counts(),horizontal=True,color="#2457a7")
+        trend=scored.assign(gun=pd.to_datetime(scored.transaction_datetime).dt.date).groupby("gun").agg(Islem=("transaction_id","count"),Yuksek=("risk_level",lambda x:(x=="YUKSEK").sum()));st.subheader("Gunluk egilim");st.line_chart(trend)
 with tabs["Islem listesi"]:
-    a,b,c,d=st.columns([1,1,1.4,2]);levels=a.multiselect("Risk seviyesi",["YUKSEK","ORTA","DUSUK"],default=["YUKSEK"]);minimum=b.slider("Minimum skor",0,100,70);statuses=c.multiselect("Vaka durumu",cases.CASE_STATUSES,default=cases.CASE_STATUSES);q=d.text_input("Islem / musteri ara")
+    a,b,c,d=st.columns([1,1,1.4,2]);levels=a.multiselect("Risk seviyesi",["YUKSEK","ORTA","DUSUK"],default=["YUKSEK"] if audit_choice=="Tüm işlemler" else ["YUKSEK","ORTA","DUSUK"],key=f"levels_{audit_choice}");minimum=b.slider("Minimum skor",0,100,70 if audit_choice=="Tüm işlemler" else 0,key=f"minimum_{audit_choice}");statuses=c.multiselect("Vaka durumu",cases.CASE_STATUSES,default=cases.CASE_STATUSES);q=d.text_input("Islem / musteri ara")
     filtered=view[view.risk_level.isin(levels)&(view.risk_score>=minimum)&view.case_status.isin(statuses)].copy()
     if q:filtered=filtered[filtered.transaction_id.astype(str).str.contains(q,case=False,regex=False)|filtered.customer_id.astype(str).str.contains(q,case=False,regex=False)]
     cols=["transaction_id","customer_id","transaction_datetime","age","transaction_amount","daily_transfer_total","daily_transaction_count","risk_score","risk_level","case_status"]
     st.dataframe(filtered[cols],hide_index=True,width="stretch",height=430);st.download_button("Excel indir",lambda: workbook(filtered,case_rows[case_rows.transaction_id.isin(filtered.transaction_id)],None),"risk_analizi.xlsx",width="stretch")
 with tabs["Vaka detayi"]:
-    candidates=scored.sort_values(["risk_score","transaction_amount"],ascending=False);sid=st.selectbox("Incelenecek islem",candidates.transaction_id.astype(str),key="case");row=scored[scored.transaction_id.astype(str)==sid].iloc[0];saved=cases.get_case(db,sid)
-    k=st.columns(4);k[0].metric("Risk",row.risk_level);k[1].metric("Skor",f"{row.risk_score}/100");k[2].metric("Hareketsizlik",f"{row.inactivity_days:g} gun");k[3].metric("Tutar",f"{row.transaction_amount:,.0f} TL")
-    l,r=st.columns(2)
-    with l:
-        st.subheader("Risk gerekceleri")
-        for x in str(row.risk_reasons).split(" | "):st.warning(x)
-    with r:
-        st.subheader("Kontrol aksiyonlari")
-        for x in str(row.recommended_actions).split(" | "):st.success(x)
-    with st.form(f"case_form_{sid}_{actor}"):
-        l,r=st.columns(2);status=l.selectbox("Durum",cases.CASE_STATUSES,index=cases.CASE_STATUSES.index(saved["status"]),disabled=not editable);analyst=r.text_input("Inceleyen",saved["analyst"] or actor,disabled=not editable);unit=l.text_input("Birim",saved["responsible_unit"],disabled=not editable);action=r.text_input("Alinan aksiyon",saved["action_taken"],disabled=not editable);note=st.text_area("Inceleme notu",saved["review_note"],disabled=not editable);evidence=st.text_area("Kanit aciklamasi",saved["evidence_note"],disabled=not editable)
-        if st.form_submit_button("Kaydet",type="primary",width="stretch",disabled=not editable):cases.save_case(db,actor,sid,dict(zip(cases.FIELDS,[status,analyst,unit,note,action,evidence])));st.rerun()
+    if scored.empty:
+        st.info("Seçilen denetimde eşleşen işlem bulunmadı.")
+    else:
+        candidates=scored.sort_values(["risk_score","transaction_amount"],ascending=False);sid=st.selectbox("Incelenecek islem",candidates.transaction_id.astype(str),key="case");row=scored[scored.transaction_id.astype(str)==sid].iloc[0];saved=cases.get_case(db,sid)
+        k=st.columns(4);k[0].metric("Risk",row.risk_level);k[1].metric("Skor",f"{row.risk_score}/100");k[2].metric("Hareketsizlik",f"{row.inactivity_days:g} gun");k[3].metric("Tutar",f"{row.transaction_amount:,.0f} TL")
+        l,r=st.columns(2)
+        with l:
+            st.subheader("Risk gerekceleri")
+            for x in str(row.risk_reasons).split(" | "):st.warning(x)
+        with r:
+            st.subheader("Kontrol aksiyonlari")
+            for x in str(row.recommended_actions).split(" | "):st.success(x)
+        with st.form(f"case_form_{sid}_{actor}"):
+            l,r=st.columns(2);status=l.selectbox("Durum",cases.CASE_STATUSES,index=cases.CASE_STATUSES.index(saved["status"]),disabled=not editable);analyst=r.text_input("Inceleyen",saved["analyst"] or actor,disabled=not editable);unit=l.text_input("Birim",saved["responsible_unit"],disabled=not editable);action=r.text_input("Alinan aksiyon",saved["action_taken"],disabled=not editable);note=st.text_area("Inceleme notu",saved["review_note"],disabled=not editable);evidence=st.text_area("Kanit aciklamasi",saved["evidence_note"],disabled=not editable)
+            if st.form_submit_button("Kaydet",type="primary",width="stretch",disabled=not editable):cases.save_case(db,actor,sid,dict(zip(cases.FIELDS,[status,analyst,unit,note,action,evidence])));st.rerun()
 with tabs["Yonetici raporu"]:
     confirmed=int((case_rows.status=="Risk doğrulandı").sum()) if len(case_rows) else 0;false=int((case_rows.status=="Yanlış alarm").sum()) if len(case_rows) else 0
     for col,(label,value) in zip(st.columns(4),[("Isleme alinan",len(case_rows)),("Risk dogrulandi",confirmed),("Yanlis alarm",false),("Yanlis alarm orani",f"%{false/len(case_rows)*100:.1f}" if len(case_rows) else "%0")]):col.metric(label,value)
@@ -181,8 +231,11 @@ with tabs["Yonetici raporu"]:
     audit_export = store.audit(db, actor) if admin else None
     st.download_button("Yonetici Excel raporu",lambda: workbook(view,case_rows,audit_export),"yonetici_raporu.xlsx",width="stretch")
 with tabs["Vaka asistani"]:
-    aid=st.selectbox("Ozetlenecek islem",candidates.transaction_id.astype(str),key="assistant");x=scored[scored.transaction_id.astype(str)==aid].iloc[0];s=cases.get_case(db,aid);draft=f"{aid} numarali islem {x.risk_score}/100 skorla {x.risk_level} risklidir. Gunluk toplam {x.daily_transfer_total:,.2f} TL'dir. Gerekceler: {x.risk_reasons}. Onerilen kontroller: {x.recommended_actions}. Vaka durumu: {s['status']}. Bu taslak yetkili kontrol personeli tarafindan dogrulanmalidir."
-    st.caption("Veri disariya gonderilmez; denetlenebilir yerel taslak uretilir.");st.text_area("Vaka ozeti",draft,height=220);st.download_button("Ozeti indir",draft.encode("utf-8"),f"{aid}_ozet.txt")
+    if scored.empty:
+        st.info("Seçilen denetimde eşleşen işlem bulunmadı.")
+    else:
+        aid=st.selectbox("Ozetlenecek islem",candidates.transaction_id.astype(str),key="assistant");x=scored[scored.transaction_id.astype(str)==aid].iloc[0];s=cases.get_case(db,aid);draft=f"{aid} numarali islem {x.risk_score}/100 skorla {x.risk_level} risklidir. Gunluk toplam {x.daily_transfer_total:,.2f} TL'dir. Gerekceler: {x.risk_reasons}. Onerilen kontroller: {x.recommended_actions}. Vaka durumu: {s['status']}. Bu taslak yetkili kontrol personeli tarafindan dogrulanmalidir."
+        st.caption("Veri disariya gonderilmez; denetlenebilir yerel taslak uretilir.");st.text_area("Vaka ozeti",draft,height=220);st.download_button("Ozeti indir",draft.encode("utf-8"),f"{aid}_ozet.txt")
 if admin:
     with tabs["Kural yonetimi"]:
         st.warning("Degisiklikler yeni analizleri etkiler ve denetim izine kaydedilir.")
