@@ -9,3 +9,7 @@ Her ziyaretçi kendi geçici SQLite çalışma alanında demo yöneticisi olarak
 CSV ve Excel içe aktarma, örnek veri kümesindeki transaction_id değerlerinden bir alt küme seçer. Gerçek müşteri, banka veya dış model bağlantısı kullanılmaz. Demo notlarına yalnızca örnek içerik girilmelidir.
 
 Yerelde başlatmak için Python 3.12 ile `pip install -r requirements.txt` ve `streamlit run app.py` komutlarını çalıştırın.
+
+## Sonraki oturumda devam etme
+
+Sistem yönetimi sekmesinde demo veritabanı yedeğini indir. Yeni bir oturumda **Yedekten devam et** altında bu dosyayı seç, çalışma alanının değişmesini onayla ve **Yedeği geri yükle** düğmesine bas. Kurallar, vaka durumları ve notları, kullanıcı adları ve roller ile kayıtlı denetim izi geri gelir. Yedekten gelen kullanıcılar için yönetici yeni bir demo parolası belirleyebilir. Geçersiz bir yedek mevcut çalışma alanını değiştirmez.

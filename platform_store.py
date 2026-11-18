@@ -97,3 +97,19 @@ def backup(db, actor):
         return copy.serialize()
     finally:
         copy.close()
+
+
+def activate_restored_user(db, actor, name, password):
+    require(db, actor, ROLES[:1])
+    if len(password) < 8:
+        raise ValueError("En az 8 karakterli bir demo parolası girin.")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600000)
+    with db:
+        changed = db.execute(
+            "UPDATE users SET salt=?,digest=? WHERE name=? AND name!='demo' AND digest IS NULL",
+            (salt, digest, name),
+        )
+        if not changed.rowcount:
+            raise ValueError("Etkinleştirilecek kullanıcı bulunamadı.")
+        log(db, actor, "Yedek kullanıcısı etkinleştirildi", name)

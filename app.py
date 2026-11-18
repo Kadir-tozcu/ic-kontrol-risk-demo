@@ -1,4 +1,5 @@
 from io import BytesIO
+import sqlite3
 from zipfile import BadZipFile, ZipFile
 
 import pandas as pd
@@ -6,6 +7,7 @@ import streamlit as st
 
 import case_store as cases
 import platform_store as store
+from recovery import recover, MAX_BYTES
 from risk_engine import RULE_FIELDS, score_transactions
 from synthetic_data import generate_synthetic_data
 
@@ -93,6 +95,8 @@ if not st.session_state.identity:
 actor, role = st.session_state.identity
 admin = role == "Yönetici"
 editable = role in store.ROLES[:2]
+if st.session_state.pop("restored_notice", False):
+    st.success("Çalışma alanı geri yüklendi. Vaka, kural ve denetim kayıtların hazır.")
 rules = store.get_rules(db)
 df = analyze(rules)
 st.title("🛡️ İç Kontrol Risk Ajansı")
@@ -100,7 +104,7 @@ st.caption("10.000 sentetik işlem • Açıklanabilir kural tabanlı risk anali
 with st.sidebar:
     st.header("Çalışma alanı")
     st.write(f"{actor} · {role}")
-    st.caption("Bu alan yalnızca senin tarayıcı oturumuna aittir. Oturum kapandığında demo kayıtları silinir. Yalnızca örnek bilgiler gir.")
+    st.caption("Bu alan yalnızca senin tarayıcı oturumuna aittir. Sonraki oturumda devam etmek için Sistem yönetimi bölümünden yedeğini indir. Yalnızca örnek bilgiler gir.")
     if st.button("Hesaptan çık"):
         with db:
             store.log(db, actor, "Çıkış", role)
@@ -241,3 +245,40 @@ if admin:
         st.download_button("Denetim izini indir", spreadsheet_safe(audit).to_csv(index=False).encode("utf-8-sig"), "denetim_izi.csv")
         st.download_button("Demo veritabanı yedeği", store.backup(db, actor), "demo_yedek.db")
         st.caption("Yedek, bu oturumun kayıtlarını, kurallarını ve denetim izini içerir. Parola doğrulama bilgileri dışarı aktarılmaz.")
+
+        with st.expander("Yedekten devam et"):
+            st.caption("Bu sürümün ve önceki yedi ekranlı sürümün .db yedekleri desteklenir. Açtığın yedek, bu oturumdaki çalışma alanının yerini alır. Mevcut kayıtlarını saklamak için önce yedeklerini indir.")
+            with st.form("restore_workspace"):
+                imported = st.file_uploader("Demo yedeği (.db)", type=["db"], max_upload_size=12)
+                confirmed = st.checkbox("Bu oturumda seçtiğim yedeği aç")
+                if st.form_submit_button("Yedeği geri yükle"):
+                    if imported is None or not confirmed:
+                        st.info("Bir .db dosyası seç ve çalışma alanını değiştirmeyi onayla.")
+                    else:
+                        try:
+                            if imported.size > MAX_BYTES:
+                                raise ValueError("Yedek 12 MB sınırını aşıyor.")
+                            recovered = recover(db, actor, imported.getvalue(), set(sample().transaction_id))
+                        except (ValueError, TypeError, sqlite3.Error, OverflowError):
+                            st.error("Yedek açılamadı. Dosya türünü, boyutunu ve demo yedeği olduğunu kontrol et. Mevcut çalışma alanın korunuyor.")
+                        else:
+                            for key in list(st.session_state):
+                                del st.session_state[key]
+                            st.session_state[db_key] = recovered
+                            st.session_state.identity = ("demo", "Yönetici")
+                            st.session_state.restored_notice = True
+                            db.close()
+                            st.rerun()
+        inactive = [r[0] for r in db.execute("SELECT name FROM users WHERE name!='demo' AND digest IS NULL ORDER BY name")]
+        if inactive:
+            with st.form("activate_account", clear_on_submit=True):
+                st.caption("Yedekten gelen hesapla giriş yapmak için yeni bir demo parolası belirle.")
+                pending = st.selectbox("Etkinleştirilecek kullanıcı", inactive)
+                replacement = st.text_input("Yeni demo parolası", type="password", max_chars=256)
+                if st.form_submit_button("Hesabı etkinleştir"):
+                    try:
+                        store.activate_restored_user(db, actor, pending, replacement)
+                    except ValueError as error:
+                        st.error(str(error))
+                    else:
+                        st.rerun()
