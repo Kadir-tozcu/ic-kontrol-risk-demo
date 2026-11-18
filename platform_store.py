@@ -8,7 +8,36 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from risk_engine import DEFAULTS, RULE_FIELDS
+from legacy_engine import RULE_FIELDS
+
+DEFAULT_RULES = {'inactivity_days_threshold': 365,
+ 'inactivity_points': 25,
+ 'senior_age': 65,
+ 'senior_points': 10,
+ 'very_senior_age': 75,
+ 'very_senior_points': 20,
+ 'high_amount': 250000,
+ 'high_amount_points': 15,
+ 'ratio_medium': 3,
+ 'ratio_medium_points': 12,
+ 'ratio_high': 5,
+ 'ratio_high_points': 20,
+ 'new_recipient_points': 15,
+ 'off_hours_start': 20,
+ 'off_hours_end': 7,
+ 'off_hours_points': 10,
+ 'reactivation_count': 3,
+ 'reactivation_count_points': 15,
+ 'inactive_senior_combo_points': 15,
+ 'daily_amount': 500000,
+ 'daily_count': 25,
+ 'daily_volume_count_points': 25,
+ 'elderly_daily_age': 70,
+ 'elderly_daily_amount': 1000000,
+ 'elderly_daily_points': 25,
+ 'high_sla_hours': 24,
+ 'medium_sla_hours': 72}
+DEFAULTS = {key: DEFAULT_RULES[key] for key in RULE_FIELDS}
 
 ROLES = ("Yönetici", "İnceleyen", "Görüntüleyen")
 
@@ -17,6 +46,7 @@ def initialize():
     db = sqlite3.connect(":memory:", check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.executescript("""
+        PRAGMA user_version=2;
         CREATE TABLE users (name TEXT PRIMARY KEY COLLATE NOCASE, role TEXT, salt BLOB, digest BLOB);
         CREATE TABLE settings (id INTEGER PRIMARY KEY, data TEXT);
         CREATE TABLE cases (transaction_id TEXT PRIMARY KEY, status TEXT, analyst TEXT,

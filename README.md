@@ -13,3 +13,5 @@ Yerelde başlatmak için Python 3.12 ile `pip install -r requirements.txt` ve `s
 ## Sonraki oturumda devam etme
 
 Sistem yönetimi sekmesinde demo veritabanı yedeğini indir. Yeni bir oturumda **Yedekten devam et** altında bu dosyayı seç, çalışma alanının değişmesini onayla ve **Yedeği geri yükle** düğmesine bas. Kurallar, vaka durumları ve notları, kullanıcı adları ve roller ile kayıtlı denetim izi geri gelir. Yedekten gelen kullanıcılar için yönetici yeni bir demo parolası belirleyebilir. Geçersiz bir yedek mevcut çalışma alanını değiştirmez.
+
+Yeni oturumlar sağlanan V3–V6 risk motoru, özgün sentetik veri üreticisi ve kaynak koddaki varsayılan eşik/ağırlıklarla açılır. Demo, standart sütun isimlerini kullanır. Veri sözlüğü için yalnızca bu sütunları destekleyen bir uyumluluk modülü vardır. Önceki web demosundan alınan bir yedek açıldığında eski veri kümesi ve eski puanlama birlikte kullanılır.

@@ -5,7 +5,7 @@ from datetime import datetime
 
 from case_store import CASE_STATUSES
 from platform_store import ROLES, initialize, log, require
-from risk_engine import DEFAULTS, RULE_FIELDS
+from platform_store import DEFAULTS, RULE_FIELDS
 
 MAX_BYTES = 12 * 1024 * 1024
 
@@ -26,7 +26,7 @@ def schema(db):
     ).fetchall()
 
 
-def recover(current, actor, data, valid_ids):
+def recover(current, actor, data, valid_ids, legacy_ids=None):
     require(current, actor, ROLES[:1])
     if not 0 < len(data) <= MAX_BYTES or not data.startswith(b"SQLite format 3\x00"):
         raise ValueError("Bu dosya geçerli bir demo yedeği değil.")
@@ -37,6 +37,11 @@ def recover(current, actor, data, valid_ids):
         source.execute("PRAGMA trusted_schema=OFF")
         source.execute("PRAGMA query_only=ON")
         source.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_BYTES)
+        version = source.execute("PRAGMA user_version").fetchone()[0]
+        if version not in (0, 2):
+            raise ValueError("Desteklenmeyen yedek sürümü.")
+        if version == 0 and legacy_ids is not None:
+            valid_ids = legacy_ids
         if schema(source) != [tuple(row) for row in schema(result)]:
             raise ValueError("Yedek şeması bu uygulamaya ait değil.")
         if source.execute("PRAGMA quick_check(1)").fetchone() != ("ok",):
@@ -49,6 +54,7 @@ def recover(current, actor, data, valid_ids):
         ):
             raise ValueError("Yedekte geçersiz kural eşikleri var.")
         with result:
+            result.execute(f"PRAGMA user_version={version}")
             result.execute("UPDATE settings SET data=? WHERE id=1", (json.dumps(rules),))
             for name, role in source.execute("SELECT name,role FROM users"):
                 if not string(name, 48).strip() or role not in ROLES:

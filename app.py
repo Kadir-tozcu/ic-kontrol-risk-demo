@@ -8,7 +8,10 @@ import streamlit as st
 import case_store as cases
 import platform_store as store
 from recovery import recover, MAX_BYTES
-from risk_engine import RULE_FIELDS, score_transactions
+from platform_store import RULE_FIELDS
+from risk_engine import score_transactions
+import legacy_data
+import legacy_engine
 from synthetic_data import generate_synthetic_data
 
 st.set_page_config(page_title="İç Kontrol Risk Ajansı", page_icon="🛡️", layout="wide")
@@ -16,13 +19,19 @@ st.markdown("<style>.block-container{max-width:1450px;padding-top:2rem}div[data-
 
 
 @st.cache_data(show_spinner=False)
-def sample():
+def sample(legacy=False):
+    if legacy:
+        return legacy_data.generate_synthetic_data(10000, 42)
     return generate_synthetic_data(10000, 42)
 
 
 @st.cache_data(show_spinner=False)
-def analyze(rules):
-    return score_transactions(sample(), rules)
+def analyze(rules, legacy):
+    if legacy:
+        return legacy_engine.score_transactions(sample(True), rules)
+    result = score_transactions(sample(), rules)
+    result["risk_level"] = result.risk_level.replace({"YUKSEK": "YÜKSEK", "DUSUK": "DÜŞÜK"})
+    return result
 
 
 def spreadsheet_safe(df):
@@ -98,9 +107,10 @@ editable = role in store.ROLES[:2]
 if st.session_state.pop("restored_notice", False):
     st.success("Çalışma alanı geri yüklendi. Vaka, kural ve denetim kayıtların hazır.")
 rules = store.get_rules(db)
-df = analyze(rules)
+legacy = db.execute("PRAGMA user_version").fetchone()[0] == 0
+df = analyze(rules, legacy)
 st.title("🛡️ İç Kontrol Risk Ajansı")
-st.caption("10.000 sentetik işlem • Açıklanabilir kural tabanlı risk analizi")
+st.caption(("Önceki web demosu · eski yedek" if legacy else "V3–V6 kaynak motoru") + " · 10.000 sentetik işlem")
 with st.sidebar:
     st.header("Çalışma alanı")
     st.write(f"{actor} · {role}")
@@ -196,7 +206,7 @@ with tabs["Yönetici raporu"]:
     if len(records):
         st.subheader("İnceleyen bazında iş yükü")
         st.bar_chart(records.analyst.value_counts())
-    reference = sample().transaction_datetime.max()
+    reference = sample(legacy).transaction_datetime.max()
     hours = (reference - view.transaction_datetime).dt.total_seconds() / 3600
     sla = view.risk_level.map({"YÜKSEK":rules["high_sla_hours"], "ORTA":rules["medium_sla_hours"]})
     st.metric("İnceleme süresini aşan işlem", int(((hours > sla) & ~view.case_status.isin(["Kapatıldı","Yanlış alarm"])).sum()))
@@ -258,7 +268,7 @@ if admin:
                         try:
                             if imported.size > MAX_BYTES:
                                 raise ValueError("Yedek 12 MB sınırını aşıyor.")
-                            recovered = recover(db, actor, imported.getvalue(), set(sample().transaction_id))
+                            recovered = recover(db, actor, imported.getvalue(), set(sample().transaction_id), set(sample(True).transaction_id))
                         except (ValueError, TypeError, sqlite3.Error, OverflowError):
                             st.error("Yedek açılamadı. Dosya türünü, boyutunu ve demo yedeği olduğunu kontrol et. Mevcut çalışma alanın korunuyor.")
                         else:
