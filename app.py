@@ -1,4 +1,6 @@
 from io import BytesIO
+import json
+from datetime import datetime
 import sqlite3
 from zipfile import BadZipFile, ZipFile
 
@@ -9,14 +11,13 @@ import case_store as cases
 import platform_store as store
 from recovery import recover, MAX_BYTES
 from platform_store import RULE_FIELDS
-from risk_engine import score_transactions
+from risk_engine import REQUIRED_COLUMNS, score_transactions
 import legacy_data
 import legacy_engine
 from synthetic_data import generate_synthetic_data
 
-st.set_page_config(page_title="İç Kontrol Risk Ajansı", page_icon="🛡️", layout="wide")
-st.markdown("<style>.block-container{max-width:1450px;padding-top:2rem}div[data-testid=stMetric]{padding:.8rem;border:1px solid #8393a344;border-radius:.65rem}</style>", unsafe_allow_html=True)
-
+st.set_page_config(page_title="Ic Kontrol Risk Ajansi", page_icon="🛡️", layout="wide")
+st.markdown("""<style>.stApp{background:#f5f7fb}.block-container{padding-top:1.3rem;max-width:1500px}[data-testid=stMetric]{background:white;border:1px solid #e3e8f1;padding:14px;border-radius:12px}.sub{color:#667085;margin-top:-14px}</style>""", unsafe_allow_html=True)
 
 @st.cache_data(show_spinner=False)
 def sample(legacy=False):
@@ -73,32 +74,39 @@ def imported_ids(file, allowed):
     return ids.unique()
 
 
-def metrics(items):
-    for col, (label, value) in zip(st.columns(len(items)), items):
-        col.metric(label, value)
-
-
-def number(value):
-    return f"{value:,}".replace(",", ".")
-
-
 db_key = "workspace_db"
 if db_key not in st.session_state:
     st.session_state[db_key] = store.initialize()
     st.session_state.identity = ("demo", "Yönetici")
 db = st.session_state[db_key]
 if not st.session_state.identity:
-    st.title("Demo hesabına giriş")
+    st.title("🛡️ Ic Kontrol Risk Ajansi")
     st.caption("Bu çalışma alanında oluşturduğun demo hesabıyla giriş yap. Yeni bir tarayıcı oturumu ayrı bir örnek alan açar.")
     with st.form("login", clear_on_submit=True):
-        username = st.text_input("Kullanıcı adı")
+        username = st.text_input("Kullanici adi")
         password = st.text_input("Parola", type="password")
-        if st.form_submit_button("Giriş yap"):
+        if st.form_submit_button("Giris yap"):
             identity = store.authenticate(db, username, password)
             if identity:
                 st.session_state.identity = identity
                 st.rerun()
             st.error("Kullanıcı adı veya parola geçersiz.")
+    if db.execute("SELECT count(*) FROM users").fetchone()[0] == 1:
+        with st.expander("Ilk yonetici kurulumu"):
+            with st.form("setup", clear_on_submit=True):
+                u = st.text_input("Yonetici kullanici adi")
+                pw = st.text_input("Parola (en az 8 karakter)", type="password")
+                repeat = st.text_input("Parolayi tekrar yazin", type="password")
+                if st.form_submit_button("Hesabi olustur"):
+                    if pw != repeat:
+                        st.error("Parolalar ayni degil.")
+                    else:
+                        try:
+                            store.create_user(db, "demo", u, pw, "Yönetici")
+                            st.session_state.identity = (u.strip(), "Yönetici")
+                            st.rerun()
+                        except ValueError as error:
+                            st.error(str(error))
     st.stop()
 
 actor, role = st.session_state.identity
@@ -108,14 +116,10 @@ if st.session_state.pop("restored_notice", False):
     st.success("Çalışma alanı geri yüklendi. Vaka, kural ve denetim kayıtların hazır.")
 rules = store.get_rules(db)
 legacy = db.execute("PRAGMA user_version").fetchone()[0] == 0
-df = analyze(rules, legacy)
-st.title("🛡️ İç Kontrol Risk Ajansı")
-st.caption(("Önceki web demosu · eski yedek" if legacy else "V3–V6 kaynak motoru") + " · 10.000 sentetik işlem")
+st.title("🛡️ Ic Kontrol Risk Ajansi");st.markdown('<div class="sub">Risk analizi • Vaka yonetimi • Yonetisim • Yerel karar destek asistani</div>',unsafe_allow_html=True)
 with st.sidebar:
-    st.header("Çalışma alanı")
-    st.write(f"{actor} · {role}")
-    st.caption("Bu alan yalnızca senin tarayıcı oturumuna aittir. Sonraki oturumda devam etmek için Sistem yönetimi bölümünden yedeğini indir. Yalnızca örnek bilgiler gir.")
-    if st.button("Hesaptan çık"):
+    st.write(f"**{actor}** — {role}")
+    if st.button("Guvenli cikis",width="stretch"):
         with db:
             store.log(db, actor, "Çıkış", role)
         for key in list(st.session_state):
@@ -123,139 +127,81 @@ with st.sidebar:
                 del st.session_state[key]
         st.session_state.identity = None
         st.rerun()
-    source = st.radio("Veri kaynağı", ["10.000 sentetik işlem", "CSV / Excel seçimi"])
+    st.divider();source=st.radio("Veri kaynagi",["10.000 sentetik islemle demo","CSV / Excel yukle"]);uploaded=None
     if source.startswith("CSV"):
-        st.caption("Örnek ID listesini indir, inceleyeceğin satırları bırak ve CSV veya Excel olarak yükle. Tutarlar ve müşteri alanları sentetik kaynaktan gelir.")
-        st.download_button("Örnek ID listesi", df[["transaction_id"]].to_csv(index=False), "ornek_islemler.csv")
-        file = st.file_uploader("Sentetik işlem ID listesi", type=["csv", "xlsx"])
-        if not file:
-            st.info("İncelenecek işlem listesini seç.")
-            st.stop()
-        try:
-            df = df[df.transaction_id.isin(imported_ids(file, df.transaction_id))]
-        except (ValueError, OSError, KeyError, BadZipFile):
-            st.error("Dosya okunamadı. En fazla 2 MB büyüklüğünde, transaction_id sütunu ve geçerli örnek kimlikler içeren CSV veya XLSX kullan.")
-            st.stop()
-    levels = st.multiselect("Risk seviyesi", ["YÜKSEK", "ORTA", "DÜŞÜK"], default=["YÜKSEK", "ORTA", "DÜŞÜK"])
-    minimum = st.slider("Asgari risk puanı", 0, 100, 0, 5)
-    dormant = st.checkbox("Yalnızca 365+ gün hareketsiz")
-    older = st.checkbox("Yalnızca 65 yaş ve üzeri")
+        st.caption("Demo veri kümesinden işlem seçmek için transaction_id sütunu içeren bir dosya yükleyin.")
+        st.download_button("Örnek ID listesi", sample(legacy)[["transaction_id"]].to_csv(index=False), "ornek_islemler.csv")
+        uploaded=st.file_uploader("Dosya secin",type=["csv","xlsx"])
+        with st.expander("Gerekli sutunlar"):st.code("transaction_id",language=None)
+try:
+    if source.startswith("10.000"): scored=analyze(rules, legacy)
+    elif uploaded is None: st.info("Dosya yukleyin.");st.stop()
+    else:
+        scored=analyze(rules, legacy)
+        scored=scored[scored.transaction_id.isin(imported_ids(uploaded, scored.transaction_id))].copy()
+    scored["risk_level"] = scored.risk_level.replace({"YÜKSEK":"YUKSEK","DÜŞÜK":"DUSUK"})
+except Exception as e:st.error(f"Dosya analiz edilemedi: {e}");st.stop()
 
-view = df[df.risk_level.isin(levels) & (df.risk_score >= minimum)].copy()
-if dormant:
-    view = view[view.inactivity_days >= 365]
-if older:
-    view = view[view.age >= 65]
-if not editable:
-    view["customer_id"] = view.customer_id.str[-2:].radd("DEMO-***")
-records = cases.load_cases(db)
-records = records[records.transaction_id.isin(view.transaction_id)]
-view["case_status"] = view.transaction_id.map(records.set_index("transaction_id").status).fillna("Yeni")
-view = view.sort_values(["risk_score", "transaction_amount"], ascending=False)
-closed = records.status.isin(["Kapatıldı", "Yanlış alarm"])
-metrics([("Kaynak işlem", number(len(df))), ("Filtrelenen işlem", number(len(view))),
-         ("Yüksek risk", number(view.risk_level.eq("YÜKSEK").sum())), ("Açık vaka", number((~closed).sum())),
-         ("Ortalama skor", f"{view.risk_score.mean():.1f}/100" if len(view) else "—")])
+case_rows=cases.load_cases(db);case_rows=case_rows[case_rows.transaction_id.isin(scored.transaction_id)];status_map=case_rows.set_index("transaction_id")["status"].to_dict() if len(case_rows) else {};scored["case_status"]=scored["transaction_id"].astype(str).map(status_map).fillna("Yeni")
+view=scored.copy()
+if role=="Görüntüleyen":view["customer_id"]=view["customer_id"].astype(str).map(lambda x:x[:3]+"***"+x[-2:])
+high=int((scored.risk_level=="YUKSEK").sum());closed=int(scored.case_status.isin(["Kapatıldı","Yanlış alarm"]).sum())
+for col,(label,value) in zip(st.columns(5),[("Toplam islem",len(scored)),("Yuksek risk",high),("Acik vaka",len(scored)-closed),("Kapatilan",closed),("Ortalama skor",f"{scored.risk_score.mean():.1f}/100")]):col.metric(label,value)
 
-pages = ["Risk panosu", "İşlem listesi", "Vaka detayı", "Yönetici raporu", "Vaka asistanı"]
-if admin:
-    pages += ["Kural yönetimi", "Sistem yönetimi"]
-tabs = dict(zip(pages, st.tabs(pages)))
+names=["Risk panosu","Islem listesi","Vaka detayi","Yonetici raporu","Vaka asistani"]+(["Kural yonetimi","Sistem yonetimi"] if admin else []); tabs=dict(zip(names,st.tabs(names)))
 with tabs["Risk panosu"]:
-    if view.empty:
-        st.info("Filtrelere uygun işlem yok.")
-    else:
-        l, r = st.columns(2)
-        l.subheader("Risk seviyeleri")
-        l.bar_chart(view.risk_level.value_counts())
-        r.subheader("Vaka durumları")
-        r.bar_chart(records.status.value_counts() if len(records) else pd.Series({"Kayıtlı vaka": 0}))
-        st.subheader("Risk puanı dağılımı")
-        st.bar_chart(view.groupby(pd.cut(view.risk_score, [-1,19,39,59,79,100], labels=["0–19","20–39","40–59","60–79","80–100"]), observed=False).size())
-        st.subheader("Günlük işlem eğilimi")
-        st.line_chart(view.groupby(view.transaction_datetime.dt.date).agg(İşlem=("transaction_id", "size"), Yüksek=("risk_level", lambda s: (s == "YÜKSEK").sum())))
-with tabs["İşlem listesi"]:
-    statuses = st.multiselect("Vaka durumu", cases.CASE_STATUSES, default=cases.CASE_STATUSES)
-    q = st.text_input("İşlem veya müşteri ara")
-    table = view[view.case_status.isin(statuses)]
-    if q:
-        table = table[table.transaction_id.str.contains(q, regex=False, case=False) | table.customer_id.str.contains(q, regex=False, case=False)]
-    st.dataframe(table, hide_index=True, width="stretch")
-    st.download_button("CSV indir", table.to_csv(index=False).encode("utf-8-sig"), "risk_analizi.csv")
-    st.download_button("İşlem listesi Excel", lambda: workbook(table, records[records.transaction_id.isin(table.transaction_id)], None), "risk_analizi.xlsx")
-with tabs["Vaka detayı"]:
-    if view.empty:
-        st.info("İncelenecek işlem yok.")
-    else:
-        tx = st.selectbox("İncelenecek işlem", view.transaction_id, key="case_tx")
-        row = view.loc[view.transaction_id.eq(tx)].iloc[0]
-        saved = cases.get_case(db, tx)
-        metrics([("Risk seviyesi", row.risk_level), ("Risk puanı", f"{row.risk_score}/100"), ("Hareketsizlik", f"{row.inactivity_days} gün"), ("Tutar", f"{row.transaction_amount:,.2f} TL")])
-        st.write("**Risk gerekçeleri**", row.risk_reasons)
-        st.write("**Önerilen kontrol**", row.recommended_actions)
-        with st.form(f"case_{tx}_{actor}"):
-            values = {"status": st.selectbox("Durum", cases.CASE_STATUSES, index=cases.CASE_STATUSES.index(saved["status"]), disabled=not editable)}
-            for key, label in [("analyst","İnceleyen"),("responsible_unit","Birim"),("review_note","İnceleme notu"),("action_taken","Alınan aksiyon"),("evidence_note","Kanıt açıklaması")]:
-                values[key] = st.text_input(label, saved[key] or (actor if key == "analyst" else ""), disabled=not editable, max_chars=1000)
-            if st.form_submit_button("Vakayı kaydet", disabled=not editable):
-                cases.save_case(db, actor, tx, values)
-                st.rerun()
-with tabs["Yönetici raporu"]:
-    false = (records.status == "Yanlış alarm").sum()
-    metrics([("İşleme alınan", len(records)), ("Risk doğrulandı", (records.status == "Risk doğrulandı").sum()), ("Kapatılan", closed.sum()), ("Yanlış alarm oranı", f"%{100*false/len(records):.1f}" if len(records) else "—")])
-    if len(records):
-        st.subheader("İnceleyen bazında iş yükü")
-        st.bar_chart(records.analyst.value_counts())
-    reference = sample(legacy).transaction_datetime.max()
-    hours = (reference - view.transaction_datetime).dt.total_seconds() / 3600
-    sla = view.risk_level.map({"YÜKSEK":rules["high_sla_hours"], "ORTA":rules["medium_sla_hours"]})
-    st.metric("İnceleme süresini aşan işlem", int(((hours > sla) & ~view.case_status.isin(["Kapatıldı","Yanlış alarm"])).sum()))
-    st.caption(f"Demo değerlendirme zamanı {reference:%d.%m.%Y %H:%M}. Süre, işlem anından itibaren hesaplanır.")
+    l,r=st.columns(2)
+    with l:st.subheader("Risk dagilimi");st.bar_chart(scored.risk_level.value_counts(),horizontal=True,color="#d24b58")
+    with r:st.subheader("Vaka durumlari");st.bar_chart(scored.case_status.value_counts(),horizontal=True,color="#2457a7")
+    trend=scored.assign(gun=pd.to_datetime(scored.transaction_datetime).dt.date).groupby("gun").agg(Islem=("transaction_id","count"),Yuksek=("risk_level",lambda x:(x=="YUKSEK").sum()));st.subheader("Gunluk egilim");st.line_chart(trend)
+with tabs["Islem listesi"]:
+    a,b,c,d=st.columns([1,1,1.4,2]);levels=a.multiselect("Risk seviyesi",["YUKSEK","ORTA","DUSUK"],default=["YUKSEK"]);minimum=b.slider("Minimum skor",0,100,70);statuses=c.multiselect("Vaka durumu",cases.CASE_STATUSES,default=cases.CASE_STATUSES);q=d.text_input("Islem / musteri ara")
+    filtered=view[view.risk_level.isin(levels)&(view.risk_score>=minimum)&view.case_status.isin(statuses)].copy()
+    if q:filtered=filtered[filtered.transaction_id.astype(str).str.contains(q,case=False,regex=False)|filtered.customer_id.astype(str).str.contains(q,case=False,regex=False)]
+    cols=["transaction_id","customer_id","transaction_datetime","age","transaction_amount","daily_transfer_total","daily_transaction_count","risk_score","risk_level","case_status"]
+    st.dataframe(filtered[cols],hide_index=True,width="stretch",height=430);st.download_button("Excel indir",lambda: workbook(filtered,case_rows[case_rows.transaction_id.isin(filtered.transaction_id)],None),"risk_analizi.xlsx",width="stretch")
+with tabs["Vaka detayi"]:
+    candidates=scored.sort_values(["risk_score","transaction_amount"],ascending=False);sid=st.selectbox("Incelenecek islem",candidates.transaction_id.astype(str),key="case");row=scored[scored.transaction_id.astype(str)==sid].iloc[0];saved=cases.get_case(db,sid)
+    k=st.columns(4);k[0].metric("Risk",row.risk_level);k[1].metric("Skor",f"{row.risk_score}/100");k[2].metric("Hareketsizlik",f"{row.inactivity_days:g} gun");k[3].metric("Tutar",f"{row.transaction_amount:,.0f} TL")
+    l,r=st.columns(2)
+    with l:
+        st.subheader("Risk gerekceleri")
+        for x in str(row.risk_reasons).split(" | "):st.warning(x)
+    with r:
+        st.subheader("Kontrol aksiyonlari")
+        for x in str(row.recommended_actions).split(" | "):st.success(x)
+    with st.form(f"case_form_{sid}_{actor}"):
+        l,r=st.columns(2);status=l.selectbox("Durum",cases.CASE_STATUSES,index=cases.CASE_STATUSES.index(saved["status"]),disabled=not editable);analyst=r.text_input("Inceleyen",saved["analyst"] or actor,disabled=not editable);unit=l.text_input("Birim",saved["responsible_unit"],disabled=not editable);action=r.text_input("Alinan aksiyon",saved["action_taken"],disabled=not editable);note=st.text_area("Inceleme notu",saved["review_note"],disabled=not editable);evidence=st.text_area("Kanit aciklamasi",saved["evidence_note"],disabled=not editable)
+        if st.form_submit_button("Kaydet",type="primary",width="stretch",disabled=not editable):cases.save_case(db,actor,sid,dict(zip(cases.FIELDS,[status,analyst,unit,note,action,evidence])));st.rerun()
+with tabs["Yonetici raporu"]:
+    confirmed=int((case_rows.status=="Risk doğrulandı").sum()) if len(case_rows) else 0;false=int((case_rows.status=="Yanlış alarm").sum()) if len(case_rows) else 0
+    for col,(label,value) in zip(st.columns(4),[("Isleme alinan",len(case_rows)),("Risk dogrulandi",confirmed),("Yanlis alarm",false),("Yanlis alarm orani",f"%{false/len(case_rows)*100:.1f}" if len(case_rows) else "%0")]):col.metric(label,value)
+    if len(case_rows):st.subheader("Inceleyen bazinda is yuku");st.bar_chart(case_rows.analyst.replace("","Atanmamis").value_counts(),horizontal=True)
+    age_hours=(pd.Timestamp.now()-pd.to_datetime(scored.transaction_datetime)).dt.total_seconds()/3600;sla=scored.risk_level.map({"YUKSEK":rules["high_sla_hours"],"ORTA":rules["medium_sla_hours"]}).fillna(999999);st.metric("SLA asimi",int(((age_hours>sla)&~scored.case_status.isin(["Kapatıldı","Yanlış alarm"])).sum()))
     audit_export = store.audit(db, actor) if admin else None
-    st.download_button("Yönetici Excel raporu", lambda: workbook(view, records, audit_export), "yonetici_raporu.xlsx")
-with tabs["Vaka asistanı"]:
-    if view.empty:
-        st.info("Özetlenecek işlem yok.")
-    else:
-        selected = st.selectbox("Özetlenecek işlem", view.transaction_id, key="assistant_tx")
-        x = view.loc[view.transaction_id.eq(selected)].iloc[0]
-        draft = (f"{selected} · {x.risk_level} risk ({x.risk_score}/100). Günlük transfer toplamı {x.daily_transfer_total:,.2f} TL. "
-                 f"Gerekçeler: {x.risk_reasons}. Önerilen kontrol: {x.recommended_actions}. Vaka durumu: {x.case_status}.")
-        st.caption("Taslak, işlem ve vaka kaydından yerel kurallarla oluşturulur.")
-        st.write(draft)
-        st.download_button("Vaka özetini indir", draft, f"{selected}_ozet.txt")
-
+    st.download_button("Yonetici Excel raporu",lambda: workbook(view,case_rows,audit_export),"yonetici_raporu.xlsx",width="stretch")
+with tabs["Vaka asistani"]:
+    aid=st.selectbox("Ozetlenecek islem",candidates.transaction_id.astype(str),key="assistant");x=scored[scored.transaction_id.astype(str)==aid].iloc[0];s=cases.get_case(db,aid);draft=f"{aid} numarali islem {x.risk_score}/100 skorla {x.risk_level} risklidir. Gunluk toplam {x.daily_transfer_total:,.2f} TL'dir. Gerekceler: {x.risk_reasons}. Onerilen kontroller: {x.recommended_actions}. Vaka durumu: {s['status']}. Bu taslak yetkili kontrol personeli tarafindan dogrulanmalidir."
+    st.caption("Veri disariya gonderilmez; denetlenebilir yerel taslak uretilir.");st.text_area("Vaka ozeti",draft,height=220);st.download_button("Ozeti indir",draft.encode("utf-8"),f"{aid}_ozet.txt")
 if admin:
-    with tabs["Kural yönetimi"]:
-        st.caption("Kuralları kaydettiğinde bu oturumdaki işlemlerin risk puanları yeniden hesaplanır.")
+    with tabs["Kural yonetimi"]:
+        st.warning("Degisiklikler yeni analizleri etkiler ve denetim izine kaydedilir.")
         with st.form("rules"):
-            cols = st.columns(3)
-            changes = {}
-            for i, (key, (label, _, lo, hi)) in enumerate(RULE_FIELDS.items()):
-                changes[key] = cols[i % 3].number_input(label, lo, hi, rules[key])
-            if st.form_submit_button("Kuralları kaydet"):
-                store.save_rules(db, actor, changes)
-                st.rerun()
-    with tabs["Sistem yönetimi"]:
-        st.subheader("Demo kullanıcıları")
-        with st.form("new_account", clear_on_submit=True):
-            name = st.text_input("Yeni kullanıcı adı", max_chars=48)
-            password = st.text_input("Demo parolası", type="password", max_chars=256)
-            new_role = st.selectbox("Rol", store.ROLES)
-            if st.form_submit_button("Kullanıcı oluştur"):
-                try:
-                    store.create_user(db, actor, name, password, new_role)
-                    st.success("Demo kullanıcısı oluşturuldu.")
-                except ValueError as error:
-                    st.error(str(error))
-        st.dataframe(pd.read_sql_query("SELECT name AS Kullanıcı, role AS Rol FROM users", db), hide_index=True)
-        st.subheader("Denetim izi")
-        audit = store.audit(db, actor)
-        st.dataframe(audit, hide_index=True)
-        st.download_button("Denetim izini indir", spreadsheet_safe(audit).to_csv(index=False).encode("utf-8-sig"), "denetim_izi.csv")
-        st.download_button("Demo veritabanı yedeği", store.backup(db, actor), "demo_yedek.db")
-        st.caption("Yedek, bu oturumun kayıtlarını, kurallarını ve denetim izini içerir. Parola doğrulama bilgileri dışarı aktarılmaz.")
-
+            c1,c2,c3=st.columns(3);new=rules.copy();new["inactivity_days_threshold"]=c1.number_input("Hareketsizlik gunu",1,3650,int(rules["inactivity_days_threshold"]));new["high_amount"]=c2.number_input("Yuksek tutar",1,100000000,int(rules["high_amount"]),step=10000);new["daily_amount"]=c3.number_input("Gunluk tutar",1,100000000,int(rules["daily_amount"]),step=10000);new["daily_count"]=c1.number_input("Gunluk adet",1,10000,int(rules["daily_count"]));new["elderly_daily_age"]=c2.number_input("Ileri yas",18,110,int(rules["elderly_daily_age"]));new["elderly_daily_amount"]=c3.number_input("Ileri yas gunluk tutar",1,100000000,int(rules["elderly_daily_amount"]),step=10000);new["high_sla_hours"]=c1.number_input("Yuksek SLA saat",1,720,int(rules["high_sla_hours"]));new["medium_sla_hours"]=c2.number_input("Orta SLA saat",1,2160,int(rules["medium_sla_hours"]));
+            if st.form_submit_button("Kurallari kaydet",type="primary",width="stretch"):store.save_rules(db,actor,new);st.rerun()
+    with tabs["Sistem yonetimi"]:
+        l,r=st.columns(2)
+        with l:
+            st.subheader("Kullanici olustur")
+            # Oturumdaki st.session_state["user"] ile form anahtari cakismamali.
+            with st.form("create_user_form",clear_on_submit=True):
+                nu=st.text_input("Kullanici adi");np=st.text_input("Gecici parola",type="password");nr=st.selectbox("Rol",store.ROLES)
+                if st.form_submit_button("Olustur"):
+                    try:store.create_user(db,actor,nu,np,nr);st.rerun()
+                    except Exception as e:st.error(str(e))
+            st.dataframe(pd.read_sql_query("SELECT name AS Kullanıcı, role AS Rol FROM users",db),hide_index=True,width="stretch")
+        with r:st.subheader("Yedekleme");st.download_button("Veritabani yedegini indir",store.backup(db,actor),f"yedek_{datetime.now():%Y%m%d}.db",width="stretch")
+        audit=store.audit(db,actor);st.subheader("Denetim izi");st.dataframe(audit,hide_index=True,width="stretch",height=350);st.download_button("Denetim izini indir",spreadsheet_safe(audit).to_csv(index=False).encode("utf-8-sig"),"denetim_izi.csv")
         with st.expander("Yedekten devam et"):
             st.caption("Bu sürümün ve önceki yedi ekranlı sürümün .db yedekleri desteklenir. Açtığın yedek, bu oturumdaki çalışma alanının yerini alır. Mevcut kayıtlarını saklamak için önce yedeklerini indir.")
             with st.form("restore_workspace"):
@@ -292,3 +238,6 @@ if admin:
                         st.error(str(error))
                     else:
                         st.rerun()
+
+st.caption("V3–V6 kurumsal prototip • Yerel veri • Rol tabanli erisim • Aciklanabilir risk")
+

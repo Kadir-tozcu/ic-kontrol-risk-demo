@@ -39,7 +39,7 @@ DEFAULT_RULES = {'inactivity_days_threshold': 365,
  'medium_sla_hours': 72}
 DEFAULTS = {key: DEFAULT_RULES[key] for key in RULE_FIELDS}
 
-ROLES = ("Yönetici", "İnceleyen", "Görüntüleyen")
+ROLES = ("Yönetici", "İnceleyen", "Onaylayan", "Denetçi", "Görüntüleyen")
 
 
 def initialize():
