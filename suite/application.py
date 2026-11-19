@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import time
+from uuid import uuid4
 from html import escape
 from datetime import datetime
 from io import BytesIO
@@ -321,7 +322,9 @@ try:
         for rule_index in range(len(PROCESS_DEFINITIONS[active_process]["rules"])):
             if rule_index not in selected_rule_indices:effective_overrides[rule_index]={"rule_index":rule_index,"active":0}
         override_json=json.dumps(list(effective_overrides.values()),sort_keys=True,default=str);active_df=process_demo_cached(active_process,override_json) if source=="Sentetik demo" or source_pending else score_process_cached(process_input,active_process,override_json);active_id="record_id";active_date="event_date"
-    active_df=apply_dynamic_scenarios(active_df,list_dynamic_scenarios(active_process,active_only=True))
+    base_scores = active_df
+    published_scenarios = list_dynamic_scenarios(active_process, active_only=True)
+    active_df = apply_dynamic_scenarios(base_scores, published_scenarios)
 except Exception as e:st.error(f"Dosya analiz edilemedi: {e}");st.stop()
 
 cases=load_cases();status_map=cases.set_index("transaction_id")["status"].to_dict() if len(cases) else {};scored["case_status"]=scored["transaction_id"].astype(str).map(status_map).fillna("Yeni")
@@ -1063,13 +1066,47 @@ if admin:
             for problem in issues:
                 st.error(problem)
             test_clicked = draft_clicked = publish_clicked = False
+        new_key_slot = f"studio_new_rule_{active_process}"
+        if selected_key == "Yeni senaryo" and new_key_slot not in st.session_state:
+            st.session_state[new_key_slot] = uuid4().hex
+        candidate_key = st.session_state[new_key_slot] if selected_key == "Yeni senaryo" else selected_key
         if test_clicked:
-            matched=scenario_mask(active_df,conditions,logic);st.success(f"Senaryo {int(matched.sum())} kaydı tetikledi (toplam verinin %{matched.mean()*100:.1f}’i).") if conditions else st.error("Test için en az bir koşulu etkinleştirin.")
-            if conditions and matched.any():st.dataframe(rename_for_display(active_df.loc[matched].head(50)),hide_index=True,width="stretch")
+            other_rules = published_scenarios[published_scenarios.scenario_key != candidate_key]
+            preceding = other_rules[other_rules.scenario_key < candidate_key]
+            before_rule = apply_dynamic_scenarios(base_scores, preceding) if len(preceding) else base_scores
+            if len(preceding):
+                # The engine assigns risk levels only after evaluating all rules.
+                before_rule["risk_level"] = base_scores.risk_level
+            matched = scenario_mask(before_rule, conditions, logic)
+            candidate = dict(scenario_key=candidate_key, conditions_json=json.dumps(conditions),
+                             logic=logic, points=points, reason=reason, action=action)
+            preview_rules = pd.concat([other_rules, pd.DataFrame([candidate])], ignore_index=True).sort_values("scenario_key")
+            simulated = apply_dynamic_scenarios(base_scores, preview_rules)
+            difference = simulated.risk_score - active_df.risk_score
+            high_before = active_df.risk_level.eq("YUKSEK")
+            high_after = simulated.risk_level.eq("YUKSEK")
+            st.subheader("Yayımlama öncesi etki")
+            st.caption(f"{tr_text(active_process)} · {len(active_df)} kayıt · Mevcut sonuçlar, bu sürüm yayımlandığında oluşacak sonuçlarla karşılaştırılır.")
+            for col, (label, value) in zip(st.columns(4), [
+                ("Koşulları karşılayan", matched.sum()), ("Puanı değişen", difference.ne(0).sum()),
+                ("Yüksek riske geçen", (~high_before & high_after).sum()),
+                ("Yüksek riskten çıkan", (high_before & ~high_after).sum())]):
+                col.metric(label, int(value))
+            affected = matched | difference.ne(0) | high_after.ne(high_before)
+            if affected.any():
+                details = pd.DataFrame({
+                    field_label(active_id): active_df[active_id],
+                    "Mevcut puan": active_df.risk_score, "Öngörülen puan": simulated.risk_score,
+                    "Puan farkı": difference, "Mevcut seviye": active_df.risk_level.map(RISK_LABELS),
+                    "Öngörülen seviye": simulated.risk_level.map(RISK_LABELS)})
+                ordered = difference[affected].abs().sort_values(ascending=False, kind="stable").index
+                st.caption(f"Eşleşen veya sonucu değişen {int(affected.sum())} kayıttan en yüksek puan farkına göre ilk 50 kayıt gösterilir.")
+                st.dataframe(details.loc[ordered].head(50), hide_index=True, width="stretch")
+            else:
+                st.info("Bu veri setinde koşullara uyan veya puanı değişen kayıt bulunamadı.")
         if draft_clicked or publish_clicked:
             try:
-                from uuid import uuid4
-                key=uuid4().hex if selected_key=="Yeni senaryo" else selected_key;version=save_dynamic_scenario(key,active_process,name,description,logic,conditions,points,reason,action,user["username"],publish_clicked);st.session_state.studio_selection=key;st.session_state.studio_notice=f"{name} · v{version} {'yayımlandı' if publish_clicked else 'taslak olarak kaydedildi'}. Güncel dosyayı indirebilirsiniz.";st.rerun()
+                key=candidate_key;version=save_dynamic_scenario(key,active_process,name,description,logic,conditions,points,reason,action,user["username"],publish_clicked);st.session_state.pop(new_key_slot,None);st.session_state.studio_selection=key;st.session_state.studio_notice=f"{name} · v{version} {'yayımlandı' if publish_clicked else 'taslak olarak kaydedildi'}. Güncel dosyayı indirebilirsiniz.";st.rerun()
             except Exception as e:st.error(str(e))
         if current is not None and current["active"]:
             if st.button("Senaryoyu analizden çıkar", help="Bu sürümün puanlamasını durdurur. Daha sonra yeniden etkinleştirebilirsiniz."):
