@@ -578,6 +578,10 @@ if page=="İşlem listesi":
             if st.button("Seçilen vakaları güncelle",disabled=not selected_rows,width="stretch",key=f"bulk_apply_{active_process}"):
                 case_ids=selected_rows if active_process=="Para Transferleri" else [f"{active_process}:{x}" for x in selected_rows];count=bulk_update_cases(case_ids,bulk_status,update_analyst,user["username"]);st.success(f"{count} vaka güncellendi.");st.rerun()
 if page=="Vaka detayı":
+    if st.session_state.get(origin_key) == "Senaryo stüdyosu":
+        for key in st.session_state.get("studio_return_fields", []):
+            if key in st.session_state:
+                st.session_state[key] = st.session_state[key]
     origin = st.session_state.get(origin_key, "İşlem listesi")
     st.button(f"← {origin} ekranına dön", on_click=return_to_origin, args=(origin,))
     pending = st.session_state.pop(f"pending_case_{active_process}", None)
@@ -993,7 +997,7 @@ if admin:
         selected_key=st.selectbox("Çalışılacak senaryo",["Yeni senaryo"]+scenario_keys,key=picker_key,format_func=lambda x:x if x=="Yeni senaryo" else scenario_rows[scenario_rows.scenario_key==x].iloc[0]["name"])
         current=None
         if selected_key!="Yeni senaryo":
-            versions=scenario_rows[scenario_rows.scenario_key==selected_key];version_id=st.selectbox("Sürüm",versions.id.tolist(),format_func=lambda i:f"v{int(versions[versions.id==i].iloc[0].version)} · {versions[versions.id==i].iloc[0].status}");current=versions[versions.id==version_id].iloc[0]
+            versions=scenario_rows[scenario_rows.scenario_key==selected_key];version_id=st.selectbox("Sürüm",versions.id.tolist(),key=f"studio_version_{selected_key}",format_func=lambda i:f"v{int(versions[versions.id==i].iloc[0].version)} · {versions[versions.id==i].iloc[0].status}");current=versions[versions.id==version_id].iloc[0]
         templates = {
             "Para Transferleri": {
                 "Hareketsiz hesaptan yüksek tutarlı transfer": (
@@ -1081,7 +1085,12 @@ if admin:
         if selected_key == "Yeni senaryo" and new_key_slot not in st.session_state:
             st.session_state[new_key_slot] = uuid4().hex
         candidate_key = st.session_state[new_key_slot] if selected_key == "Yeni senaryo" else selected_key
+        test_key = f"studio_test_{tenant_id}_{active_process}"
+        signature = (candidate_key, editor_key, json.dumps(conditions,sort_keys=True), logic, points,
+                     reason, action, compare_index, alternative if compare_index is not None else None)
         if test_clicked:
+            st.session_state[test_key] = signature
+        if not issues and st.session_state.get(test_key) == signature:
             other_rules = published_scenarios[published_scenarios.scenario_key != candidate_key]
             preceding = other_rules[other_rules.scenario_key < candidate_key]
             before_rule = apply_dynamic_scenarios(base_scores, preceding) if len(preceding) else base_scores
@@ -1103,6 +1112,10 @@ if admin:
                 ("Yüksek riske geçen", (~high_before & high_after).sum()),
                 ("Yüksek riskten çıkan", (high_before & ~high_after).sum())]):
                 col.metric(label, int(value))
+            without_candidate = apply_dynamic_scenarios(base_scores, other_rules)
+            other_reasons = without_candidate.risk_reasons.fillna("").astype(str).str.strip()
+            covered = other_reasons.ne("") & ~other_reasons.str.startswith("Tetiklenen risk kurali yok")
+            groups = {"Formdaki eşleşmeler": matched}
             if compare_index is not None:
                 trial_conditions = [dict(term) for term in conditions]
                 trial_conditions[compare_index]["value"] = alternative
@@ -1120,6 +1133,38 @@ if admin:
                 st.dataframe(comparison, hide_index=True, width="stretch")
                 st.download_button("Eşik karşılaştırmasını indir", comparison.to_csv(index=False).encode("utf-8-sig"),
                                    "esik_karsilastirmasi.csv", "text/csv", on_click="ignore")
+                groups = {
+                    "Kapsamdan çıkan": matched & ~alternative_mask,
+                    "Kapsama giren": alternative_mask & ~matched,
+                    "Her iki eşikte eşleşen": matched & alternative_mask,
+                    **groups,
+                }
+            st.markdown("#### Kayıtlar ve diğer senaryolar")
+            st.caption("Diğer senaryoların kapsamı, test edilen senaryonun bütün sürümleri hariç tutularak hesaplanır.")
+            group_key = f"coverage_group_{editor_key}"
+            coverage_key = f"coverage_filter_{editor_key}"
+            if st.session_state.get(group_key) not in groups:
+                st.session_state[group_key] = next(iter(groups))
+            group = st.radio("İncelenecek kayıt grubu", list(groups), horizontal=True, key=group_key,
+                             format_func=lambda label: f"{label} ({int(groups[label].sum())})")
+            mask = groups[group]
+            filters = {"Tümü": mask, "Başka senaryoda da var": mask & covered,
+                       "Başka senaryo yakalamıyor": mask & ~covered}
+            choice = st.radio("Diğer senaryolarla örtüşme", list(filters), horizontal=True, key=coverage_key,
+                              format_func=lambda label: f"{label} ({int(filters[label].sum())})")
+            review = active_df.loc[filters[choice], [active_id,"risk_score","risk_level"]].copy()
+            review["Diğer risk gerekçeleri"] = other_reasons.loc[review.index].where(covered.loc[review.index], "Yok").map(tr_text)
+            review = review.sort_values(["risk_score", active_id], ascending=[False,True], kind="stable")
+            if review.empty:
+                st.info("Bu seçimde incelenecek kayıt yok.")
+            else:
+                review["risk_level"] = review.risk_level.map(RISK_LABELS)
+                display = review.rename(columns={active_id:field_label(active_id), "risk_score":"Mevcut puan","risk_level":"Risk seviyesi"})
+                st.caption("Vaka detayını açmak için satırı seçin.")
+                prefixes = ("cond_", "studio_picker_", "studio_version_", "template_", "condition_count_",
+                            "name_", "desc_", "logic_", "points_", "reason_", "action_", "compare_", "alternative_", "coverage_")
+                st.session_state.studio_return_fields = [k for k in st.session_state if k.startswith(prefixes)]
+                case_table(review, display, f"studio_review_{active_process}", "Senaryo stüdyosu", 350)
             affected = matched | difference.ne(0) | high_after.ne(high_before)
             if affected.any():
                 details = pd.DataFrame({
