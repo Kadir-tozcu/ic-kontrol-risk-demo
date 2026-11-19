@@ -41,4 +41,10 @@ def sla_notifications(data: pd.DataFrame, date_col: str, rules: dict) -> pd.Data
     if "due_date" in data:
         due=pd.to_datetime(data["due_date"],errors="coerce")+pd.Timedelta(hours=23,minutes=59);due_remaining=(due-now).dt.total_seconds()/3600;remaining=due_remaining.where(due.notna(),remaining)
     open_mask=~data.case_status.isin(["Kapatildi","Yanlis alarm","Risk dogrulandi"])
-    result=data.loc[open_mask&(remaining<=12),[c for c in ["risk_level","risk_score","case_status"] if c in data]].copy();result["Kalan saat"]=remaining[open_mask&(remaining<=12)].round(1);result["Bildirim"]=result["Kalan saat"].map(lambda x:"SLA aşıldı" if x<0 else "SLA yaklaşıyor");return result
+    alert_mask = open_mask & remaining.le(12)
+    fields = [c for c in ["risk_level", "risk_score", "case_status"] if c in data]
+    result = data.loc[alert_mask, fields].copy()
+    hours = remaining.loc[alert_mask]
+    result["Kalan saat"] = hours
+    result["Bildirim"] = hours.map(lambda value: "SLA aşıldı" if value < 0 else "SLA yaklaşıyor")
+    return result
