@@ -83,6 +83,15 @@ h2,h3{letter-spacing:-.02em}hr{border-color:#eaecf0!important}
 .st-key-main_navigation label:has(input:checked){background:#eef4ff;border-color:#b2ccff;color:#1849a9}
 .st-key-main_navigation label>div:first-child{display:none!important}
 .st-key-main_navigation [data-testid="stMarkdownContainer"] p{font-size:13px;font-weight:650;white-space:nowrap;margin:0}
+.st-key-mobile_navigation,.st-key-mobile_cases{display:none!important}
+@media(max-width:767px){
+  .st-key-desktop_navigation,.st-key-desktop_cases{display:none!important}
+  .st-key-mobile_navigation,.st-key-mobile_cases{display:flex!important}
+  .st-key-mobile_cases button{min-height:46px;text-align:left;justify-content:flex-start}
+  .st-key-mobile_cases button p{text-align:left}
+  .block-container{padding-left:1rem;padding-right:1rem}
+  .case-hero{flex-wrap:wrap;gap:12px}
+}
 </style>""", unsafe_allow_html=True)
 
 def login():
@@ -321,7 +330,15 @@ source_label="Veri seçimi bekleniyor · geçici demo" if source_pending else "Y
 st.markdown('<div class="process-selector-label">Senaryo / süreç seçimi</div>',unsafe_allow_html=True)
 active_process=st.selectbox("Senaryo / süreç seçimi",process_options,key="active_process",format_func=tr_text,label_visibility="collapsed",help="Seçtiğiniz süreç; veri şablonunu, risk analizlerini, vaka ekranlarını ve kuralları birlikte günceller.")
 st.markdown(f'<div class="process-selector-note">{source_label} · Tüm analiz ekranları <b>{tr_text(active_process)}</b> süreciyle eşitlendi.</div>',unsafe_allow_html=True)
-page=st.radio("Çalışma ekranı",names,key="main_navigation",horizontal=True,label_visibility="collapsed",format_func=lambda x:f"{nav_icons.get(x,'•')}  {x}")
+def select_mobile_page():
+    st.session_state.main_navigation = st.session_state.mobile_page
+
+with st.container(key="desktop_navigation"):
+    page=st.radio("Çalışma ekranı",names,key="main_navigation",horizontal=True,label_visibility="collapsed",format_func=lambda x:f"{nav_icons.get(x,'•')}  {x}")
+with st.container(key="mobile_navigation"):
+    st.session_state.mobile_page = page
+    st.selectbox("Çalışma ekranı", names, key="mobile_page", on_change=select_mobile_page)
+
 active_case_ids=active_df[active_id].astype(str) if active_process=="Para Transferleri" else active_process+":"+active_df[active_id].astype(str)
 active_status_map=cases.set_index("transaction_id")["status"].to_dict() if len(cases) else {};active_df["case_status"]=active_case_ids.map(active_status_map).fillna("Yeni")
 if len(cases):
@@ -351,13 +368,16 @@ def enter_queue(label):
     st.session_state.pop(f"list_memory_{active_process}", None)
     st.session_state.main_navigation = "İşlem listesi"
 
+def show_case(record_id, origin, sequence):
+    st.session_state[f"case_{active_process}"] = record_id
+    st.session_state[f"review_sequence_{active_process}"] = sequence
+    st.session_state[origin_key] = origin
+    st.session_state.main_navigation = "Vaka detayı"
+
 def open_selected_case(table_key, ids, origin, sequence):
     rows = st.session_state[table_key].selection.rows
     if rows and 0 <= rows[0] < len(ids):
-        st.session_state[f"case_{active_process}"] = ids[rows[0]]
-        st.session_state[f"review_sequence_{active_process}"] = sequence
-        st.session_state[origin_key] = origin
-        st.session_state.main_navigation = "Vaka detayı"
+        show_case(ids[rows[0]], origin, sequence)
 
 def case_table(frame, display, key, origin, height, sequence=None):
     ids = frame[active_id].astype(str).tolist()
@@ -488,8 +508,28 @@ if page=="İşlem listesi":
             st.number_input(f"Liste sayfası (1–{page_count})", 1, page_count, key=widget_key, on_change=remember_page)
         offset = (page_number - 1) * 50
         visible = filtered.iloc[offset:offset + 50]
-        st.caption("Vaka detayını açmak için satırı seçin.")
-        case_table(visible, filtered_display.iloc[offset:offset + 50], f"list_rows_{active_process}_{page_number}", "İşlem listesi", 430, filtered[active_id].astype(str).tolist())
+        sequence = filtered[active_id].astype(str).tolist()
+        with st.container(key="desktop_cases"):
+            st.caption("Vaka detayını açmak için satırı seçin.")
+            case_table(visible, filtered_display.iloc[offset:offset + 50], f"list_rows_{active_process}_{page_number}", "İşlem listesi", 430, sequence)
+        with st.container(key="mobile_cases"):
+            group_starts = list(range(0, len(visible), 5))
+            start = 0
+            if len(group_starts) > 1:
+                group_key = f"mobile_group_{active_process}_{page_number}"
+                remembered = st.session_state.get("mobile_group_memory", {}).get(group_key, 0)
+                start = st.selectbox("Gösterilen kayıtlar", group_starts,
+                                     index=group_starts.index(remembered) if remembered in group_starts else 0,
+                                     format_func=lambda n: f"{offset+n+1}–{offset+min(n+5,len(visible))}",
+                                     key=group_key)
+                st.session_state.setdefault("mobile_group_memory", {})[group_key] = start
+            for _, record in visible.iloc[start:start+5].iterrows():
+                record_id = str(record[active_id])
+                with st.container(border=True):
+                    st.text(record_id)
+                    st.caption(f"{RISK_LABELS.get(record.risk_level, record.risk_level)} risk · {record.risk_score}/100 · {tr_text(record.case_status)}")
+                    st.button("Vakayı aç", key=f"mobile_open_{active_process}_{record_id}", width="stretch",
+                              on_click=show_case, args=(record_id, "İşlem listesi", sequence))
     st.download_button("Düzenlenmiş Excel indir",styled_result_excel(filtered,active_process),f"{tr_text(active_process).replace('/','-').replace(' ','_')}_risk_analizi.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",width="stretch")
     reason_summary=active_df.risk_reasons.str.split(r" \| ").explode().map(tr_text).value_counts().rename("Tetiklenme").rename_axis("Risk senaryosu").reset_index()
     with st.expander(f"📊 Senaryo tarama özeti · {len(reason_summary)} gösterge",expanded=False):st.dataframe(reason_summary,hide_index=True,width="stretch")
