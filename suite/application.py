@@ -355,10 +355,12 @@ all_records = "Tüm kayıtlar"
 open_cases = ~active_df.case_status.isin(["Kapatildi", "Yanlis alarm", "Risk dogrulandi"])
 analyst = active_df.get("analyst", pd.Series("", index=active_df.index)).fillna("")
 reviewer = active_df.get("reviewer", pd.Series("", index=active_df.index)).fillna("")
-approaching_index = notifications.index[notifications["Bildirim"].eq("SLA yaklaşıyor")] if not notifications.empty else []
+sla_alerts = notifications.get("Bildirim", pd.Series(dtype=str))
+sla_hours = notifications.get("Kalan saat", pd.Series(dtype=float))
 work_queues = {
+    "SLA aşıldı": active_df.index.isin(sla_alerts.index[sla_alerts.eq("SLA aşıldı")]),
+    "Süresi yaklaşanlar": active_df.index.isin(sla_alerts.index[sla_alerts.eq("SLA yaklaşıyor")]),
     "Bana atananlar": open_cases & (analyst.eq(user["username"]) | reviewer.eq(user["username"])),
-    "Süresi yaklaşanlar": active_df.index.isin(approaching_index),
     "Atanmamış yüksek riskler": open_cases & analyst.str.strip().eq("") & active_df.risk_level.eq("YUKSEK"),
 }
 
@@ -391,11 +393,10 @@ def return_to_origin(origin):
 if page=="Operasyon merkezi":
     st.subheader(f"{organization['organization_name']} · Operasyon Merkezi")
     st.caption(f"{tr_text(active_process)} sürecinin güncel kontrol görünümü")
-    overdue=int((notifications.get("Bildirim",pd.Series(dtype=str))=="SLA aşıldı").sum()) if len(notifications) else 0;approaching=len(notifications)-overdue
-    oc=st.columns(4);oc[0].metric("Açık vaka",len(active_df)-active_closed);oc[1].metric("SLA aşıldı",overdue);oc[2].metric("SLA yaklaşıyor",approaching);oc[3].metric("Atanmamış vaka",int((active_df.case_status=="Yeni").sum()))
     st.subheader("Bugünkü işlerim")
-    for column, (label, mask) in zip(st.columns(3), work_queues.items()):
+    for column, (label, mask) in zip(st.columns(len(work_queues)), work_queues.items()):
         column.button(f"{label} · {int(mask.sum())}", on_click=enter_queue, args=(label,), width="stretch")
+    st.caption(f"Atanmamış açık vaka sayısı: {int((open_cases & analyst.str.strip().eq('')).sum())}")
     left,right=st.columns([1.5,1])
     with left:
         st.markdown("#### Öncelikli çalışma listesi")
@@ -403,7 +404,7 @@ if page=="Operasyon merkezi":
     with right:
         st.markdown(f"#### Bildirim merkezi · {len(notifications)}")
         if notifications.empty:st.success("Yaklaşan veya aşılmış SLA bildirimi bulunmuyor.")
-        else:st.dataframe(notifications.sort_values("Kalan saat"),hide_index=True,width="stretch",height=360)
+        else:st.dataframe(notifications.sort_values("Kalan saat").round({"Kalan saat": 1}),hide_index=True,width="stretch",height=360)
     open_statuses=[x for x in CASE_STATUSES if x not in ["Kapatildi","Yanlis alarm","Risk dogrulandi"]];my_work=cases[(cases.status.isin(open_statuses))&((cases.analyst==user["username"])|(cases.reviewer==user["username"]))].copy() if len(cases) else pd.DataFrame()
     with st.expander(f"🔔 Uygulama içi görev ve onay bildirimleri · {len(my_work)}",expanded=bool(len(my_work))):
         if my_work.empty:st.success("Size atanmış açık görev veya onay bekleyen vaka bulunmuyor.")
@@ -492,8 +493,17 @@ if page=="İşlem listesi":
     st.session_state[memory_key] = current_filters
     if queue in work_queues:
         filtered = filtered.loc[filtered.index.isin(active_df.index[work_queues[queue]])].sort_values("risk_score", ascending=False)
+    time_column = None
+    if queue in ("SLA aşıldı", "Süresi yaklaşanlar"):
+        overdue_queue = queue == "SLA aşıldı"
+        time_column = "Gecikme (saat)" if overdue_queue else "Kalan süre (saat)"
+        filtered[time_column] = sla_hours.reindex(filtered.index).abs()
+        filtered = filtered.sort_values([time_column, "risk_score", active_id], ascending=[not overdue_queue, False, True])
+        filtered[time_column] = filtered[time_column].round(1)
     if q:filtered=filtered[filtered[active_id].astype(str).str.contains(q,case=False,regex=False)|filtered.customer_id.astype(str).str.contains(q,case=False,regex=False)]
     preferred=[active_id,"customer_id",active_date,"transaction_type","source_channel","age","transaction_amount","loan_amount","amount","journal_amount","invoice_amount","payment_amount","deal_amount","exposure_amount","daily_transfer_total","daily_transaction_count","risk_score","risk_level","case_status"];cols=[c for c in preferred if c in filtered.columns]
+    if time_column:
+        cols.insert(1, time_column)
     filtered_display=filtered[cols].copy();filtered_display["risk_level"]=filtered_display["risk_level"].map(RISK_LABELS);filtered_display["case_status"]=filtered_display["case_status"].map(tr_text);filtered_display=rename_for_display(filtered_display)
     st.caption(f"Gösterilen süreç: {tr_text(active_process)} · {len(filtered)} kayıt listeleniyor")
     if filtered.empty:st.info("Seçilen risk seviyesi, skor aralığı, vaka durumu ve arama ölçütlerine uyan kayıt bulunamadı. Filtreleri genişletmeyi deneyin.")
@@ -527,6 +537,8 @@ if page=="İşlem listesi":
                 record_id = str(record[active_id])
                 with st.container(border=True):
                     st.text(record_id)
+                    if time_column:
+                        st.caption(f"{time_column}: {record[time_column]:.1f}".replace(".", ","))
                     st.caption(f"{RISK_LABELS.get(record.risk_level, record.risk_level)} risk · {record.risk_score}/100 · {tr_text(record.case_status)}")
                     st.button("Vakayı aç", key=f"mobile_open_{active_process}_{record_id}", width="stretch",
                               on_click=show_case, args=(record_id, "İşlem listesi", sequence))
