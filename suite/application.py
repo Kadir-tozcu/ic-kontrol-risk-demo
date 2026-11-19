@@ -351,17 +351,19 @@ def enter_queue(label):
     st.session_state.pop(f"list_memory_{active_process}", None)
     st.session_state.main_navigation = "İşlem listesi"
 
-def open_selected_case(table_key, ids, origin):
+def open_selected_case(table_key, ids, origin, sequence):
     rows = st.session_state[table_key].selection.rows
     if rows and 0 <= rows[0] < len(ids):
         st.session_state[f"case_{active_process}"] = ids[rows[0]]
+        st.session_state[f"review_sequence_{active_process}"] = sequence
         st.session_state[origin_key] = origin
         st.session_state.main_navigation = "Vaka detayı"
 
-def case_table(frame, display, key, origin, height):
+def case_table(frame, display, key, origin, height, sequence=None):
+    ids = frame[active_id].astype(str).tolist()
     st.dataframe(display, hide_index=True, width="stretch", height=height, key=key,
                  selection_mode="single-row", on_select=lambda: open_selected_case(
-                     key, frame[active_id].astype(str).tolist(), origin))
+                     key, ids, origin, ids if sequence is None else sequence))
 
 def return_to_origin(origin):
     st.session_state.main_navigation = origin
@@ -487,7 +489,7 @@ if page=="İşlem listesi":
         offset = (page_number - 1) * 50
         visible = filtered.iloc[offset:offset + 50]
         st.caption("Vaka detayını açmak için satırı seçin.")
-        case_table(visible, filtered_display.iloc[offset:offset + 50], f"list_rows_{active_process}_{page_number}", "İşlem listesi", 430)
+        case_table(visible, filtered_display.iloc[offset:offset + 50], f"list_rows_{active_process}_{page_number}", "İşlem listesi", 430, filtered[active_id].astype(str).tolist())
     st.download_button("Düzenlenmiş Excel indir",styled_result_excel(filtered,active_process),f"{tr_text(active_process).replace('/','-').replace(' ','_')}_risk_analizi.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",width="stretch")
     reason_summary=active_df.risk_reasons.str.split(r" \| ").explode().map(tr_text).value_counts().rename("Tetiklenme").rename_axis("Risk senaryosu").reset_index()
     with st.expander(f"📊 Senaryo tarama özeti · {len(reason_summary)} gösterge",expanded=False):st.dataframe(reason_summary,hide_index=True,width="stretch")
@@ -522,6 +524,11 @@ if page=="İşlem listesi":
 if page=="Vaka detayı":
     origin = st.session_state.get(origin_key, "İşlem listesi")
     st.button(f"← {origin} ekranına dön", on_click=return_to_origin, args=(origin,))
+    pending = st.session_state.pop(f"pending_case_{active_process}", None)
+    if pending and pending in set(active_df[active_id].astype(str)):
+        st.session_state[f"case_{active_process}"] = pending
+    if message := st.session_state.pop("review_confirmation", None):
+        st.success(message)
     candidates=active_df.sort_values("risk_score",ascending=False);sid=st.selectbox("İncelenecek kayıt",candidates[active_id].astype(str),key=f"case_{active_process}");row=active_df[active_df[active_id].astype(str)==sid].iloc[0];case_id=sid if active_process=="Para Transferleri" else f"{active_process}:{sid}";saved=get_case(case_id)
     risk_level=RISK_LABELS.get(row.risk_level,row.risk_level);risk_class={"YUKSEK":"risk-high","ORTA":"risk-medium","DUSUK":"risk-low"}.get(row.risk_level,"risk-medium");customer=str(row.get("customer_id","—"));case_status=tr_text(saved["status"])
     st.markdown(f'<div class="case-hero"><div><div class="case-kicker">Vaka dosyası · {escape(case_status)}</div><h2>{escape(sid)}</h2><p>{escape(tr_text(active_process))} · Müşteri/Kayıt sahibi: {escape(customer)}</p></div><div class="risk-pill {risk_class}">{escape(risk_level)}<small>{int(row.risk_score)}/100 risk skoru</small></div></div>',unsafe_allow_html=True)
@@ -530,11 +537,52 @@ if page=="Vaka detayı":
     for col,(label,value) in zip(facts,fact_values):col.markdown(f'<div class="case-fact"><span>{escape(label)}</span><b>{escape(str(value))}</b></div>',unsafe_allow_html=True)
     st.progress(int(row.risk_score)/100,text=f"Risk yoğunluğu: %{int(row.risk_score)}")
     reasons=[tr_text(x) for x in str(row.risk_reasons).split(" | ") if x.strip()];actions=[tr_text(x) for x in str(row.recommended_actions).split(" | ") if x.strip()]
+    def observed_number(field):
+        return pd.to_numeric(row.get(field), errors="coerce")
+
+    def observed_value(reason):
+        reason = reason.partition(": ")[2] if reason.startswith("+") else reason
+        fields = []
+        if active_process == "Para Transferleri":
+            if reason.startswith(("Hesap en az", "Hareketsizlik ile")):
+                fields.append(("Hareketsiz süre", observed_number("inactivity_days"), "gün"))
+            if reason.startswith(("Musteri ", "Hareketsizlik ile")):
+                fields.append(("Yaş", observed_number("age"), "yıl"))
+            if reason.startswith("Tutar tarihsel"):
+                average = observed_number("historical_avg_amount")
+                if average > 0:
+                    fields.append(("Geçmiş ortalamanın katı", observed_number("transaction_amount") / average, "kat"))
+                    fields.append(("Geçmiş ortalama", average, "TL"))
+            if reason.startswith(("Islem tutari ", "Yeni aliciya ilk transfer")):
+                fields.append(("İşlem tutarı", observed_number("transaction_amount"), "TL"))
+            if reason.startswith("Ayni gun toplam"):
+                fields.extend([("Günlük toplam", observed_number("daily_transfer_total"), "TL"),
+                               ("İşlem sayısı", observed_number("daily_transaction_count"), "adet")])
+        elif active_process == "Krediler":
+            if reason.startswith("Teminat orani") and observed_number("collateral_value") > 0:
+                fields.append(("Kredi / teminat", 100 * observed_number("loan_amount") / observed_number("collateral_value"), "%"))
+            if reason.startswith("Borc/gelir"):
+                fields.append(("Borç / gelir", 100 * observed_number("debt_ratio"), "%"))
+            if reason.startswith("Dusuk kredi skoru"):
+                fields.extend([("Kredi skoru", observed_number("credit_score"), "puan"),
+                               ("Kredi tutarı", observed_number("loan_amount"), "TL")])
+            if reason.startswith("Ilk 90"):
+                fields.append(("Temerrüde kadar geçen süre", observed_number("rapid_default_days"), "gün"))
+        parts = []
+        for label, value, unit in fields:
+            if pd.notna(value):
+                formatted = f"{value:,.2f}".rstrip("0").rstrip(".").translate(str.maketrans(".,", ",."))
+                parts.append(f"{label}: {formatted} {unit}")
+        return " · ".join(parts)
+
+    raw_reasons = [value.strip() for value in str(row.risk_reasons).split(" | ") if value.strip()]
     st.markdown('<div class="section-label">Tespitler ve önerilen kontroller</div>',unsafe_allow_html=True)
     h1,h2=st.columns(2);h1.markdown("#### Risk gerekçeleri");h2.markdown("#### Kontrol aksiyonları")
     for idx in range(max(len(reasons),len(actions))):
         left,right=st.columns(2);reason=reasons[idx] if idx<len(reasons) else "Ek risk gerekçesi bulunmuyor";control=actions[idx] if idx<len(actions) else "Yetkili inceleyen tarafından kontrol aksiyonu belirlenmeli"
         left.markdown(f'<div class="finding-card"><span class="card-no">{idx+1}</span>{escape(reason)}</div>',unsafe_allow_html=True);right.markdown(f'<div class="action-card"><span class="card-no">{idx+1}</span>{escape(control)}</div>',unsafe_allow_html=True)
+        if idx < len(raw_reasons) and (detail := observed_value(raw_reasons[idx])):
+            left.caption(detail)
     with st.expander("🔎 Kayıt verilerini göster",expanded=False):
         excluded={"risk_reasons_json","recommended_actions_json","risk_reasons","recommended_actions","risk_score","risk_level","case_status"};detail_rows=[]
         for field in active_df.columns:
@@ -549,7 +597,23 @@ if page=="Vaka detayı":
     with st.container(border=True):
         with st.form(f"case_form_{active_process}_{sid}"):
             l,r=st.columns(2);status=l.selectbox("Vaka durumu",CASE_STATUSES,index=CASE_STATUSES.index(saved["status"]),disabled=not editable,format_func=tr_text);analyst=r.text_input("İnceleyen",saved["analyst"] or user["username"],disabled=not editable);unit=l.text_input("Sorumlu birim",saved["responsible_unit"],disabled=not editable);action=r.text_input("Alınan aksiyon",saved["action_taken"],disabled=not editable);note=st.text_area("İnceleme notu",saved["review_note"],disabled=not editable,height=110);evidence=st.text_area("Kanıt ve dayanak açıklaması",saved["evidence_note"],disabled=not editable,height=90)
-            if st.form_submit_button("Vaka değişikliklerini kaydet",type="primary",width="stretch",disabled=not editable):save_case(case_id,status,analyst,unit,note,action,evidence,user["username"]);st.rerun()
+            available_ids = candidates[active_id].astype(str).tolist()
+            available = set(available_ids)
+            order = st.session_state.get(f"review_sequence_{active_process}", available_ids)
+            next_id = None
+            if sid in order:
+                current_index = order.index(sid)
+                next_id = next((value for value in order[current_index + 1:] if value in available), None)
+            save = st.form_submit_button("Vaka değişikliklerini kaydet", type="primary", width="stretch", disabled=not editable)
+            advance = st.form_submit_button("Kaydet ve sonraki vakaya geç", width="stretch", disabled=not editable or next_id is None)
+            if save or advance:
+                save_case(case_id,status,analyst,unit,note,action,evidence,user["username"])
+                st.session_state["review_confirmation"] = f"{sid} için inceleme kaydedildi."
+                if advance and next_id:
+                    st.session_state[f"pending_case_{active_process}"] = next_id
+                    if origin == "İşlem listesi" and f"review_sequence_{active_process}" in st.session_state:
+                        st.session_state[position_key] = order.index(next_id) // 50 + 1
+                st.rerun()
     st.markdown('<div class="section-label">İş akışı ve görev yönetimi</div>',unsafe_allow_html=True)
     with st.container(border=True):
         current_workflow=get_case(case_id);user_names=list_users().query("active == 1").username.astype(str).tolist();default_due=pd.Timestamp(current_workflow.get("due_date") or pd.Timestamp.now()+pd.Timedelta(hours=rules["high_sla_hours"] if row.risk_level=="YUKSEK" else rules["medium_sla_hours"])).date()
