@@ -991,20 +991,78 @@ if admin:
         current=None
         if selected_key!="Yeni senaryo":
             versions=scenario_rows[scenario_rows.scenario_key==selected_key];version_id=st.selectbox("Sürüm",versions.id.tolist(),format_func=lambda i:f"v{int(versions[versions.id==i].iloc[0].version)} · {versions[versions.id==i].iloc[0].status}");current=versions[versions.id==version_id].iloc[0]
-        available_fields=list(required_fields)+list(optional_fields);operator_names=list(OPERATORS)
-        existing=json.loads(current["conditions_json"]) if current is not None else []
-        available_fields = list(dict.fromkeys(available_fields + [condition["field"] for condition in existing]))
-        editor_key = f"{active_process}_{selected_key}_{int(current['id']) if current is not None else 0}"
+        templates = {
+            "Para Transferleri": {
+                "Hareketsiz hesaptan yüksek tutarlı transfer": (
+                    [("inactivity_days", ">=", "365"), ("transaction_amount", ">=", "250000")],
+                    "Uzun süredir hareketsiz hesaptan yüksek tutarda transfer yapıldı.",
+                    "Transfer talimatını ve müşteri teyidini incele."),
+                "Yeni alıcıya yüksek tutarlı transfer": (
+                    [("new_recipient", "==", "evet"), ("transaction_amount", ">=", "500000")],
+                    "Transfer tutarı yüksek ve alıcı bu müşteri için yeni.",
+                    "Alıcı ilişkisini ve transferin dayanağını doğrula.")
+            },
+            "Krediler": {
+                "Yüksek borç yükü ve yüksek kredi tutarı": (
+                    [("debt_ratio", ">", "0.60"), ("loan_amount", ">=", "500000")],
+                    "Borç/gelir oranı ve kredi tutarı birlikte belirlenen koşulları karşılıyor.",
+                    "Gelir belgesini ve geri ödeme kapasitesi analizini incele.")
+            }
+        }
+        defaults = current.to_dict() if current is not None else {}
+        existing = json.loads(defaults.get("conditions_json", "[]"))
+        template = "Boş senaryo"
+        if current is None and active_process in templates:
+            options = templates[active_process]
+            template = st.selectbox("Başlangıç şablonu", [template, *options], key=f"template_{active_process}",
+                                    help="Örnek eşikleri ve puanı kendi kontrol amacınıza göre değiştirebilirsiniz.")
+            if template in options:
+                terms, reason_text, action_text = options[template]
+                defaults.update(name=template, reason=reason_text, action=action_text)
+                existing = [dict(field=field, operator=op, value=value) for field, op, value in terms]
+        available_fields = list(dict.fromkeys(list(required_fields) + list(optional_fields) + [c["field"] for c in existing]))
+        editor_key = f"{active_process}_{selected_key}_{defaults.get('id', template)}"
         condition_count = st.number_input("Koşul sayısı", min_value=1, max_value=max(20,len(existing)), value=max(1,len(existing)), key=f"condition_count_{editor_key}")
-        with st.form(f"dynamic_scenario_editor_{editor_key}"):
-            name=st.text_input("Senaryo adı",value="" if current is None else current["name"]);description=st.text_area("Açıklama",value="" if current is None else current["description"],height=70);logic=st.radio("Koşulların bağlantısı",["VE","VEYA"],horizontal=True,index=0 if current is None or current["logic"]=="VE" else 1)
-            conditions=[]
+        with st.container(border=True):
+            name = st.text_input("Senaryo adı", defaults.get("name", ""), key=f"name_{editor_key}")
+            description = st.text_area("Açıklama", defaults.get("description", ""), height=70, key=f"desc_{editor_key}")
+            logic = st.radio("Koşulların bağlantısı", ["VE","VEYA"], horizontal=True, index=int(defaults.get("logic") == "VEYA"), key=f"logic_{editor_key}")
+            conditions = []
+            issues = []
             for idx in range(condition_count):
-                enabled=st.checkbox(f"{idx+1}. koşulu kullan",value=True,key=f"cond_enabled_{editor_key}_{idx}")
-                cols=st.columns([1.5,1.3,1.2]);old=existing[idx] if idx<len(existing) else {};field=cols[0].selectbox(f"{idx+1}. alan",available_fields,format_func=field_label,index=available_fields.index(old["field"]) if old.get("field") in available_fields else 0,key=f"cond_field_{editor_key}_{idx}");op_code=old.get("operator",">");op_name=next((k for k,v in OPERATORS.items() if v==op_code),"Büyüktür");operator=cols[1].selectbox(f"{idx+1}. karşılaştırma",operator_names,index=operator_names.index(op_name),key=f"cond_op_{editor_key}_{idx}");value=cols[2].text_input(f"{idx+1}. değer",value=str(old.get("value","")),key=f"cond_value_{editor_key}_{idx}")
-                if enabled:conditions.append({"field":field,"operator":OPERATORS[operator],"value":value})
-            points=st.slider("Risk puanı",1,100,int(current["points"]) if current is not None else 20);reason=st.text_input("Risk gerekçesi",value="" if current is None else current["reason"]);action=st.text_area("Önerilen kontrol aksiyonu",value="" if current is None else current["action"],height=80)
-            test_clicked=st.form_submit_button("Mevcut veride test et");draft_clicked=st.form_submit_button("Taslak olarak kaydet");publish_clicked=st.form_submit_button("Yeni sürümü yayımla",type="primary")
+                old = existing[idx] if idx < len(existing) else {}
+                suffix = f"{editor_key}_{idx}"
+                enabled = st.checkbox(f"{idx+1}. koşulu kullan", value=True, key=f"cond_enabled_{suffix}")
+                cols = st.columns([1.5,1.3,1.2])
+                field = cols[0].selectbox(f"{idx+1}. alan", available_fields, format_func=field_label, index=available_fields.index(old.get("field",available_fields[0])), key=f"cond_field_{suffix}")
+                operator = cols[1].selectbox(f"{idx+1}. karşılaştırma", list(OPERATORS), index=list(OPERATORS.values()).index(old["operator"]) if old.get("operator") in OPERATORS.values() else 0, key=f"cond_op_{suffix}")
+                op = OPERATORS[operator]
+                needs_value = op not in ("empty", "not_empty")
+                value = cols[2].text_input(f"{idx+1}. değer", str(old.get("value","")), disabled=not needs_value or not enabled, help="Sayısal eşiklerde binlik ayırıcı kullanmayın. Örnek: 250000 veya 0,60." if op in (">",">=","<","<=") else None, key=f"cond_value_{suffix}").strip()
+                if not enabled:
+                    continue
+                if needs_value and not value:
+                    issues.append(f"{idx+1}. koşul için bir değer girin.")
+                elif op in (">", ">=", "<", "<="):
+                    from math import isfinite
+                    value = value.replace(",", ".")
+                    if not isfinite(pd.to_numeric(value, errors="coerce")):
+                        issues.append(f"{idx+1}. koşula binlik ayırıcı kullanmadan sayı girin (ör. 250000 veya 0,60).")
+                conditions.append(dict(field=field, operator=op, value=value if needs_value else ""))
+            points = st.slider("Risk puanı",1,100,int(defaults.get("points",20)),key=f"points_{editor_key}")
+            reason = st.text_input("Risk gerekçesi", defaults.get("reason",""),key=f"reason_{editor_key}")
+            action = st.text_area("Önerilen kontrol aksiyonu",defaults.get("action",""),height=80,key=f"action_{editor_key}")
+            test_clicked = st.button("Mevcut veride test et")
+            draft_clicked = st.button("Taslak olarak kaydet")
+            publish_clicked = st.button("Yeni sürümü yayımla",type="primary")
+        if not conditions:
+            issues.append("En az bir koşulu etkinleştirin.")
+        if (draft_clicked or publish_clicked) and not all(text.strip() for text in (name,reason,action)):
+            issues.append("Senaryo adını, risk gerekçesini ve önerilen kontrol aksiyonunu doldurun.")
+        if issues and (test_clicked or draft_clicked or publish_clicked):
+            for problem in issues:
+                st.error(problem)
+            test_clicked = draft_clicked = publish_clicked = False
         if test_clicked:
             matched=scenario_mask(active_df,conditions,logic);st.success(f"Senaryo {int(matched.sum())} kaydı tetikledi (toplam verinin %{matched.mean()*100:.1f}’i).") if conditions else st.error("Test için en az bir koşulu etkinleştirin.")
             if conditions and matched.any():st.dataframe(rename_for_display(active_df.loc[matched].head(50)),hide_index=True,width="stretch")
