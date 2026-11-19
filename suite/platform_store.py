@@ -333,3 +333,75 @@ def create_organization(name: str, admin_username: str, admin_password: str, act
 
 def list_organizations() -> pd.DataFrame:
     with connect() as conn:return pd.read_sql_query("SELECT tenant_id,name,active,created_at FROM organizations ORDER BY name",conn)
+
+
+def pause_dynamic_scenario(key, process, username):
+    with connect() as conn:
+        conn.execute("UPDATE dynamic_scenarios SET active=0, status='PASIF' WHERE tenant_id=? AND process=? AND scenario_key=? AND active=1",
+                     (current_tenant(), process, key))
+    log_event(username, "SENARYO_PASIF", "dynamic_scenario", key, process)
+
+
+SCENARIO_FIELDS = ["scenario_key", "version", "name", "description", "logic", "points", "reason", "action", "status", "active"]
+
+
+def scenario_package(process):
+    versions = []
+    for row in list_dynamic_scenarios(process).to_dict("records"):
+        entry = {key: row[key] for key in SCENARIO_FIELDS}
+        entry["conditions"] = json.loads(row["conditions_json"])
+        versions.append(entry)
+    return {"format": "risk-ajansi-senaryo-v1", "process": process, "versions": versions}
+
+
+def restore_scenario_package(package, process, username):
+    from suite.v10_features import OPERATORS
+
+    if not isinstance(package, dict) or package.get("format") != "risk-ajansi-senaryo-v1" or package.get("process") != process:
+        raise ValueError("Dosya biçimi veya seçili süreç uyuşmuyor.")
+    versions = package.get("versions")
+    if not isinstance(versions, list) or not versions:
+        raise ValueError("Dosyada senaryo sürümü bulunamadı.")
+    existing = {}
+    active = set()
+    for row in versions:
+        if not isinstance(row, dict) or not all(k in row for k in SCENARIO_FIELDS + ["conditions"]):
+            raise ValueError("Senaryo tanımı eksik.")
+        key = row["scenario_key"]
+        if not all(isinstance(row[k], str) for k in ("scenario_key","name","description","reason","action")) or not all(row[k].strip() for k in ("scenario_key","name","reason","action")):
+            raise ValueError("Senaryo metinleri eksik veya geçersiz.")
+        if type(row["version"]) != int or not 1 <= row["version"] < 2**63 or type(row["points"]) != int or not 1 <= row["points"] <= 100:
+            raise ValueError("Sürüm veya puan geçersiz.")
+        if row["logic"] not in ("VE","VEYA") or row["status"] not in ("YAYINDA","TASLAK","PASIF") or row["active"] not in (0,1):
+            raise ValueError("Senaryo durumu geçersiz.")
+        conditions = row["conditions"]
+        if not isinstance(conditions, list) or not conditions or not all(isinstance(c,dict) and isinstance(c.get("field"),str) and c["field"] and c.get("operator") in tuple(OPERATORS.values()) and isinstance(c.get("value",""),(str,int,float,bool)) for c in conditions):
+            raise ValueError("Senaryo koşulları geçersiz.")
+        by_version = existing.setdefault(key, {})
+        if row["version"] in by_version or row["active"] and (key in active or row["status"] != "YAYINDA"):
+            raise ValueError("Dosyada çakışan sürümler var.")
+        by_version[row["version"]] = row
+        if row["active"]:
+            active.add(key)
+    added = 0
+    with connect() as conn:
+        conn.row_factory = sqlite3.Row
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        for key, by_version in existing.items():
+            stored = conn.execute("SELECT * FROM dynamic_scenarios WHERE scenario_key=?", (key,)).fetchall()
+            for old in stored:
+                item = by_version.get(old["version"])
+                if old["tenant_id"] != current_tenant() or old["process"] != process or item is None or any(old[k] != item[k] for k in SCENARIO_FIELDS) or json.loads(old["conditions_json"]) != item["conditions"]:
+                    raise ValueError("Aynı senaryonun farklı bir sürümü bu oturumda mevcut. Yedeği boş bir oturumda açın.")
+            saved = {old["version"] for old in stored}
+            for version, item in by_version.items():
+                if version in saved:
+                    continue
+                values = [item[k] for k in SCENARIO_FIELDS]
+                conn.execute(f"INSERT INTO dynamic_scenarios ({','.join(SCENARIO_FIELDS)},conditions_json,process,tenant_id,created_by,created_at) VALUES ({','.join(['?']*15)})",
+                             (*values,json.dumps(item["conditions"],ensure_ascii=False),process,current_tenant(),username,datetime.now().isoformat(timespec="seconds")))
+                added += 1
+    if added:
+        log_event(username,"SENARYO_GERI_YUKLE","dynamic_scenario",process,str(added))
+    return added
