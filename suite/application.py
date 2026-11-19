@@ -731,7 +731,7 @@ if page=="Vaka detayı":
         else:st.dataframe(timeline.rename(columns={"created_at":"Tarih","actor":"Kullanıcı","action":"İşlem","detail":"Açıklama"}),hide_index=True,width="stretch")
 if page=="Yönetici raporu":
     process_cases=cases[~cases.transaction_id.astype(str).str.contains(":",regex=False)].copy() if active_process=="Para Transferleri" else cases[cases.transaction_id.astype(str).str.startswith(active_process+":")].copy();confirmed=int((process_cases.status=="Risk dogrulandi").sum()) if len(process_cases) else 0;false=int((process_cases.status=="Yanlis alarm").sum()) if len(process_cases) else 0
-    for col,(label,value) in zip(st.columns(4),[("İşleme alınan",len(process_cases)),("Risk doğrulandı",confirmed),("Yanlış alarm",false),("Yanlış alarm oranı",f"%{false/len(process_cases)*100:.1f}" if len(process_cases) else "%0")]):col.metric(label,value)
+    for col,(label,value) in zip(st.columns(4),[("İşleme alınan",len(process_cases)),("Risk doğrulandı",confirmed),("Yanlış alarm",false),("Kararlarda yanlış alarm",f"%{false/(confirmed+false)*100:.1f}" if confirmed+false else "Karar yok")]):col.metric(label,value)
     if len(process_cases):st.subheader("İnceleyen bazında iş yükü");st.bar_chart(process_cases.analyst.replace("","Atanmamış").value_counts(),horizontal=True)
     age_hours=(pd.Timestamp.now()-pd.to_datetime(active_df[active_date])).dt.total_seconds()/3600;sla=active_df.risk_level.map({"YUKSEK":rules["high_sla_hours"],"ORTA":rules["medium_sla_hours"]}).fillna(999999);st.metric("SLA aşımı",int(((age_hours>sla)&~active_df.case_status.isin(["Kapatildi","Yanlis alarm"])).sum()))
     st.download_button("Yönetici Excel raporu",styled_result_excel(active_df,active_process),"yonetici_risk_raporu.xlsx",width="stretch")
@@ -1055,6 +1055,13 @@ if admin:
             points = st.slider("Risk puanı",1,100,int(defaults.get("points",20)),key=f"points_{editor_key}")
             reason = st.text_input("Risk gerekçesi", defaults.get("reason",""),key=f"reason_{editor_key}")
             action = st.text_area("Önerilen kontrol aksiyonu",defaults.get("action",""),height=80,key=f"action_{editor_key}")
+            threshold_indices = [i for i, term in enumerate(conditions) if term["operator"] in (">", ">=", "<", "<=")]
+            compare_index = None
+            if threshold_indices and st.checkbox("Alternatif eşikle karşılaştır", key=f"compare_{editor_key}"):
+                compare_index = st.selectbox("Karşılaştırılacak koşul", threshold_indices,
+                    format_func=lambda i: f"{i+1}. {field_label(conditions[i]['field'])} {conditions[i]['operator']} {conditions[i]['value']}",
+                    key=f"compare_field_{editor_key}")
+                alternative = st.text_input("Alternatif eşik", key=f"alternative_{editor_key}_{compare_index}").strip().replace(",", ".")
             test_clicked = st.button("Mevcut veride test et")
             draft_clicked = st.button("Taslak olarak kaydet")
             publish_clicked = st.button("Yeni sürümü yayımla",type="primary")
@@ -1062,6 +1069,10 @@ if admin:
             issues.append("En az bir koşulu etkinleştirin.")
         if (draft_clicked or publish_clicked) and not all(text.strip() for text in (name,reason,action)):
             issues.append("Senaryo adını, risk gerekçesini ve önerilen kontrol aksiyonunu doldurun.")
+        if test_clicked and compare_index is not None:
+            from math import isfinite
+            if not isfinite(pd.to_numeric(alternative, errors="coerce")):
+                issues.append("Karşılaştırma için geçerli bir alternatif eşik girin.")
         if issues and (test_clicked or draft_clicked or publish_clicked):
             for problem in issues:
                 st.error(problem)
@@ -1092,6 +1103,23 @@ if admin:
                 ("Yüksek riske geçen", (~high_before & high_after).sum()),
                 ("Yüksek riskten çıkan", (high_before & ~high_after).sum())]):
                 col.metric(label, int(value))
+            if compare_index is not None:
+                trial_conditions = [dict(term) for term in conditions]
+                trial_conditions[compare_index]["value"] = alternative
+                alternative_mask = scenario_mask(before_rule, trial_conditions, logic)
+                term = conditions[compare_index]
+                comparison = pd.DataFrame([
+                    {"Seçenek": label, "Alan": field_label(term["field"]), "İşleç": term["operator"],
+                     "Eşik": threshold, "Eşleşen kayıt": int(mask.sum()),
+                     "İlk eşiğe göre eklenen": int((mask & ~matched).sum()),
+                     "İlk eşiğe göre çıkan": int((matched & ~mask).sum())}
+                    for label, threshold, mask in [("Formdaki eşik", term["value"], matched), ("Alternatif", alternative, alternative_mask)]
+                ])
+                st.markdown("#### Eşik karşılaştırması")
+                st.caption("İki eşik aynı kayıtlar üzerinde denenir. Kaydetme ve yayımlama işlemleri formdaki eşiği kullanır.")
+                st.dataframe(comparison, hide_index=True, width="stretch")
+                st.download_button("Eşik karşılaştırmasını indir", comparison.to_csv(index=False).encode("utf-8-sig"),
+                                   "esik_karsilastirmasi.csv", "text/csv", on_click="ignore")
             affected = matched | difference.ne(0) | high_after.ne(high_before)
             if affected.any():
                 details = pd.DataFrame({
@@ -1121,6 +1149,7 @@ if admin:
         else:st.info("Bu süreç için henüz dinamik senaryo oluşturulmadı.")
         st.markdown("#### Senaryo performansı")
         performance=scenario_performance(active_df)
+        st.caption("Karar kapsamı, eşleşen kayıtların ne kadarında risk doğrulandı veya yanlış alarm kararı verildiğini gösterir. Yanlış alarm yüzdesi yalnızca bu kararlar üzerinden hesaplanır. Bir vaka birden fazla senaryoda yer alabilir.")
         if len(performance):st.dataframe(performance,hide_index=True,width="stretch")
     if page=="Kural yönetimi":
         st.warning("Değişiklikler yeni analizleri etkiler ve denetim izine kaydedilir.")
