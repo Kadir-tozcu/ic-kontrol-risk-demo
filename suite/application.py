@@ -331,15 +331,53 @@ active_df=mask_dataframe(active_df,user["role"])
 active_high=int((active_df.risk_level=="YUKSEK").sum());active_closed=int(active_df.case_status.isin(["Kapatildi","Yanlis alarm"]).sum())
 for col,(label,value) in zip(st.columns(5),[("Toplam kayıt",len(active_df)),("Yüksek risk",active_high),("Açık vaka",len(active_df)-active_closed),("Kapatılan",active_closed),("Ortalama skor",f"{active_df.risk_score.mean():.1f}/100")]):col.metric(label,value)
 notifications=sla_notifications(active_df,active_date,rules)
+queue_key = f"work_queue_{active_process}"
+position_key = f"list_position_{active_process}"
+origin_key = f"case_origin_{active_process}"
+all_records = "Tüm kayıtlar"
+open_cases = ~active_df.case_status.isin(["Kapatildi", "Yanlis alarm", "Risk dogrulandi"])
+analyst = active_df.get("analyst", pd.Series("", index=active_df.index)).fillna("")
+reviewer = active_df.get("reviewer", pd.Series("", index=active_df.index)).fillna("")
+approaching_index = notifications.index[notifications["Bildirim"].eq("SLA yaklaşıyor")] if not notifications.empty else []
+work_queues = {
+    "Bana atananlar": open_cases & (analyst.eq(user["username"]) | reviewer.eq(user["username"])),
+    "Süresi yaklaşanlar": active_df.index.isin(approaching_index),
+    "Atanmamış yüksek riskler": open_cases & analyst.str.strip().eq("") & active_df.risk_level.eq("YUKSEK"),
+}
+
+def enter_queue(label):
+    st.session_state[queue_key] = label
+    st.session_state[position_key] = 1
+    st.session_state.pop(f"list_memory_{active_process}", None)
+    st.session_state.main_navigation = "İşlem listesi"
+
+def open_selected_case(table_key, ids, origin):
+    rows = st.session_state[table_key].selection.rows
+    if rows and 0 <= rows[0] < len(ids):
+        st.session_state[f"case_{active_process}"] = ids[rows[0]]
+        st.session_state[origin_key] = origin
+        st.session_state.main_navigation = "Vaka detayı"
+
+def case_table(frame, display, key, origin, height):
+    st.dataframe(display, hide_index=True, width="stretch", height=height, key=key,
+                 selection_mode="single-row", on_select=lambda: open_selected_case(
+                     key, frame[active_id].astype(str).tolist(), origin))
+
+def return_to_origin(origin):
+    st.session_state.main_navigation = origin
+
 if page=="Operasyon merkezi":
     st.subheader(f"{organization['organization_name']} · Operasyon Merkezi")
     st.caption(f"{tr_text(active_process)} sürecinin güncel kontrol görünümü")
     overdue=int((notifications.get("Bildirim",pd.Series(dtype=str))=="SLA aşıldı").sum()) if len(notifications) else 0;approaching=len(notifications)-overdue
     oc=st.columns(4);oc[0].metric("Açık vaka",len(active_df)-active_closed);oc[1].metric("SLA aşıldı",overdue);oc[2].metric("SLA yaklaşıyor",approaching);oc[3].metric("Atanmamış vaka",int((active_df.case_status=="Yeni").sum()))
+    st.subheader("Bugünkü işlerim")
+    for column, (label, mask) in zip(st.columns(3), work_queues.items()):
+        column.button(f"{label} · {int(mask.sum())}", on_click=enter_queue, args=(label,), width="stretch")
     left,right=st.columns([1.5,1])
     with left:
         st.markdown("#### Öncelikli çalışma listesi")
-        priority=active_df.assign(_bildirim="").sort_values(["risk_score",active_date],ascending=[False,True]).head(15);priority_cols=[active_id,"customer_id",active_date,"risk_score","risk_level","case_status"];priority_display=rename_for_display(priority[[c for c in priority_cols if c in priority]].copy());st.dataframe(priority_display,hide_index=True,width="stretch",height=360)
+        priority=active_df.loc[open_cases].sort_values(["risk_score",active_date],ascending=[False,True]).head(15);priority_cols=[active_id,"customer_id",active_date,"risk_score","risk_level","case_status"];priority_display=rename_for_display(priority[[c for c in priority_cols if c in priority]].copy());case_table(priority, priority_display, f"priority_rows_{active_process}", "Operasyon merkezi", 360)
     with right:
         st.markdown(f"#### Bildirim merkezi · {len(notifications)}")
         if notifications.empty:st.success("Yaklaşan veya aşılmış SLA bildirimi bulunmuyor.")
@@ -383,8 +421,7 @@ if page=="Risk panosu":
                 st.dataframe(reason_counts.rename("Tetiklenme adedi").rename_axis("Risk senaryosu").reset_index(),hide_index=True,width="stretch")
         else:st.info("Grafik için ayarlar bölümünden en az bir risk senaryosu seçin.")
 if page=="İşlem listesi":
-    st.markdown("## 🧭 Analiz Çalıştırma Merkezi")
-    with st.container(border=True):
+    with st.expander("🧭 Analiz Çalıştırma Merkezi", expanded=st.session_state.get(queue_key, all_records) == all_records):
         st.caption("Dosyanızı yükleyin, veri kalitesini ve eşleştirmeleri kontrol edin, çalışacak senaryoları seçin ve analizi başlatın.")
         up_left,up_right=st.columns([2.2,1])
         with up_left:list_scan_file=st.file_uploader(f"{tr_text(active_process)} verisini yükleyin",type=["csv","xlsx"],key=f"list_scan_upload_{active_process}",help="Türkçe veya kuruma özel sütun adlarını kullanabilirsiniz.",on_change=activate_list_upload,args=(active_process,))
@@ -415,16 +452,42 @@ if page=="İşlem listesi":
             st.progress(1.0,text="Tarama tamamlandı · risk senaryoları uygulandı")
             st.success(f"Analiz tamamlandı. Çalışma numarası: {run_id}"+("" if is_new_run else " · Bu dosyanın önceki çalışma kaydı açıldı."))
         else:st.info("Analize başlamak için bu alandan veya sol menüden bir CSV/Excel dosyası yükleyin. Sentetik demo sonuçlarını aşağıda incelemeye devam edebilirsiniz.")
-    saved_filters=list_saved_filters(user["username"],active_process);filter_options=["Yeni/geçici filtre"]+saved_filters.id.tolist();selected_filter=st.selectbox("Kayıtlı görünüm",filter_options,format_func=lambda x:x if isinstance(x,str) else saved_filters[saved_filters.id==x].iloc[0]["name"],key=f"saved_filter_{active_process}");filter_cfg={}
+    queue = st.session_state.get(queue_key, all_records)
+    if queue in work_queues:
+        st.subheader(queue)
+        st.button("Tüm kayıtları göster", on_click=enter_queue, args=(all_records,))
+    memory_key = f"list_memory_{active_process}"
+    memory = st.session_state.get(memory_key, {})
+    saved_filters=list_saved_filters(user["username"],active_process);filter_options=["Yeni/geçici filtre"]+saved_filters.id.tolist();selected_filter=st.selectbox("Kayıtlı görünüm",filter_options,index=filter_options.index(memory["view"]) if memory.get("view") in filter_options else 0,format_func=lambda x:x if isinstance(x,str) else saved_filters[saved_filters.id==x].iloc[0]["name"],key=f"saved_filter_{active_process}");filter_cfg={}
     if not isinstance(selected_filter,str):filter_cfg=json.loads(saved_filters[saved_filters.id==selected_filter].iloc[0]["config_json"])
+    if memory.get("view") == selected_filter:
+        filter_cfg.update(memory)
     a,b,c,d=st.columns([1.2,1.3,1.6,2]);levels=a.multiselect("Risk seviyesi",["YUKSEK","ORTA","DUSUK"],default=filter_cfg.get("levels",["YUKSEK","ORTA","DUSUK"]),format_func=lambda x:RISK_LABELS[x],key=f"list_levels_{active_process}_{selected_filter}");score_range=b.slider("Skor aralığı",0,100,tuple(filter_cfg.get("score_range",[0,100])),key=f"list_score_{active_process}_{selected_filter}");statuses=c.multiselect("Vaka durumu",CASE_STATUSES,default=filter_cfg.get("statuses",CASE_STATUSES),format_func=tr_text,key=f"list_status_{active_process}_{selected_filter}");q=d.text_input("İşlem / müşteri ara",value=filter_cfg.get("query",""),key=f"list_query_{active_process}_{selected_filter}")
     filtered=active_df[active_df.risk_level.isin(levels)&active_df.risk_score.between(score_range[0],score_range[1],inclusive="both")&active_df.case_status.isin(statuses)].copy()
-    if q:filtered=filtered[filtered[active_id].astype(str).str.contains(q,case=False)|filtered.customer_id.astype(str).str.contains(q,case=False)]
+    current_filters = dict(view=selected_filter, levels=levels, score_range=score_range, statuses=statuses, query=q)
+    if current_filters != memory:
+        st.session_state[position_key] = 1
+    st.session_state[memory_key] = current_filters
+    if queue in work_queues:
+        filtered = filtered.loc[filtered.index.isin(active_df.index[work_queues[queue]])].sort_values("risk_score", ascending=False)
+    if q:filtered=filtered[filtered[active_id].astype(str).str.contains(q,case=False,regex=False)|filtered.customer_id.astype(str).str.contains(q,case=False,regex=False)]
     preferred=[active_id,"customer_id",active_date,"transaction_type","source_channel","age","transaction_amount","loan_amount","amount","journal_amount","invoice_amount","payment_amount","deal_amount","exposure_amount","daily_transfer_total","daily_transaction_count","risk_score","risk_level","case_status"];cols=[c for c in preferred if c in filtered.columns]
     filtered_display=filtered[cols].copy();filtered_display["risk_level"]=filtered_display["risk_level"].map(RISK_LABELS);filtered_display["case_status"]=filtered_display["case_status"].map(tr_text);filtered_display=rename_for_display(filtered_display)
     st.caption(f"Gösterilen süreç: {tr_text(active_process)} · {len(filtered)} kayıt listeleniyor")
     if filtered.empty:st.info("Seçilen risk seviyesi, skor aralığı, vaka durumu ve arama ölçütlerine uyan kayıt bulunamadı. Filtreleri genişletmeyi deneyin.")
-    else:st.dataframe(filtered_display,hide_index=True,width="stretch",height=430)
+    else:
+        page_count = (len(filtered) + 49) // 50
+        page_number = min(st.session_state.get(position_key, 1), page_count)
+        if page_count > 1:
+            widget_key = f"list_page_{active_process}"
+            st.session_state[widget_key] = page_number
+            def remember_page():
+                st.session_state[position_key] = st.session_state[widget_key]
+            st.number_input(f"Liste sayfası (1–{page_count})", 1, page_count, key=widget_key, on_change=remember_page)
+        offset = (page_number - 1) * 50
+        visible = filtered.iloc[offset:offset + 50]
+        st.caption("Vaka detayını açmak için satırı seçin.")
+        case_table(visible, filtered_display.iloc[offset:offset + 50], f"list_rows_{active_process}_{page_number}", "İşlem listesi", 430)
     st.download_button("Düzenlenmiş Excel indir",styled_result_excel(filtered,active_process),f"{tr_text(active_process).replace('/','-').replace(' ','_')}_risk_analizi.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",width="stretch")
     reason_summary=active_df.risk_reasons.str.split(r" \| ").explode().map(tr_text).value_counts().rename("Tetiklenme").rename_axis("Risk senaryosu").reset_index()
     with st.expander(f"📊 Senaryo tarama özeti · {len(reason_summary)} gösterge",expanded=False):st.dataframe(reason_summary,hide_index=True,width="stretch")
@@ -457,6 +520,8 @@ if page=="İşlem listesi":
             if st.button("Seçilen vakaları güncelle",disabled=not selected_rows,width="stretch",key=f"bulk_apply_{active_process}"):
                 case_ids=selected_rows if active_process=="Para Transferleri" else [f"{active_process}:{x}" for x in selected_rows];count=bulk_update_cases(case_ids,bulk_status,update_analyst,user["username"]);st.success(f"{count} vaka güncellendi.");st.rerun()
 if page=="Vaka detayı":
+    origin = st.session_state.get(origin_key, "İşlem listesi")
+    st.button(f"← {origin} ekranına dön", on_click=return_to_origin, args=(origin,))
     candidates=active_df.sort_values("risk_score",ascending=False);sid=st.selectbox("İncelenecek kayıt",candidates[active_id].astype(str),key=f"case_{active_process}");row=active_df[active_df[active_id].astype(str)==sid].iloc[0];case_id=sid if active_process=="Para Transferleri" else f"{active_process}:{sid}";saved=get_case(case_id)
     risk_level=RISK_LABELS.get(row.risk_level,row.risk_level);risk_class={"YUKSEK":"risk-high","ORTA":"risk-medium","DUSUK":"risk-low"}.get(row.risk_level,"risk-medium");customer=str(row.get("customer_id","—"));case_status=tr_text(saved["status"])
     st.markdown(f'<div class="case-hero"><div><div class="case-kicker">Vaka dosyası · {escape(case_status)}</div><h2>{escape(sid)}</h2><p>{escape(tr_text(active_process))} · Müşteri/Kayıt sahibi: {escape(customer)}</p></div><div class="risk-pill {risk_class}">{escape(risk_level)}<small>{int(row.risk_score)}/100 risk skoru</small></div></div>',unsafe_allow_html=True)
