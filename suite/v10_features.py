@@ -67,9 +67,22 @@ def apply_dynamic_scenarios(data: pd.DataFrame, scenarios: pd.DataFrame) -> pd.D
     return result
 
 def scenario_performance(data: pd.DataFrame) -> pd.DataFrame:
-    if data.empty or "risk_reasons" not in data:return pd.DataFrame(columns=["Senaryo","Tetiklenme","Risk doğrulandı","Yanlış alarm","Yanlış alarm oranı"])
-    rows=[]
-    for reason,count in data.risk_reasons.str.split(r" \| ").explode().value_counts().items():
-        mask=data.risk_reasons.str.contains(str(reason),regex=False,na=False);confirmed=int((data.loc[mask,"case_status"]=="Risk dogrulandi").sum()) if "case_status" in data else 0;false=int((data.loc[mask,"case_status"]=="Yanlis alarm").sum()) if "case_status" in data else 0;reviewed=confirmed+false
-        rows.append({"Senaryo":str(reason).split(": ",1)[-1],"Tetiklenme":int(count),"Risk doğrulandı":confirmed,"Yanlış alarm":false,"Yanlış alarm oranı":round(false/reviewed*100,1) if reviewed else 0.0})
-    return pd.DataFrame(rows)
+    columns = ["Senaryo", "Tetiklenen kayıt", "Kararı olan", "Risk doğrulandı", "Yanlış alarm",
+               "Karar kapsamı (%)", "Kararlarda yanlış alarm (%)"]
+    if data.empty or "risk_reasons" not in data:
+        return pd.DataFrame(columns=columns)
+    observations = data.reset_index(drop=True)
+    reasons = observations.risk_reasons.fillna("").str.split(" | ", regex=False).explode().str.strip()
+    reasons = reasons.str.replace(r"^\+\d+:\s*", "", regex=True)
+    reasons = reasons[reasons.ne("") & reasons.ne("Tetiklenen risk kurali yok")]
+    records = reasons.rename("Senaryo").rename_axis("record").reset_index().drop_duplicates()
+    statuses = observations.get("case_status", pd.Series("", index=observations.index))
+    records["confirmed"] = records.record.map(statuses).eq("Risk dogrulandi")
+    records["false_alarm"] = records.record.map(statuses).eq("Yanlis alarm")
+    summary = records.groupby("Senaryo").agg(
+        total=("record","size"), confirmed=("confirmed","sum"), false_alarm=("false_alarm","sum"))
+    decided = summary.confirmed + summary.false_alarm
+    summary["Kararı olan"] = decided
+    summary["Karar kapsamı (%)"] = (100 * decided / summary.total).round(1)
+    summary["Kararlarda yanlış alarm (%)"] = (100 * summary.false_alarm / decided.where(decided.gt(0))).round(1)
+    return summary.rename(columns={"total":"Tetiklenen kayıt","confirmed":"Risk doğrulandı","false_alarm":"Yanlış alarm"}).reset_index()[columns].sort_values("Tetiklenen kayıt",ascending=False,kind="stable")
