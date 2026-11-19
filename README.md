@@ -1,17 +1,7 @@
 # İç Kontrol Risk Ajansı
 
-10.000 sentetik bankacılık işlemi için kural tabanlı Streamlit demosu. Önceki kurumsal arayüz esas alınarak risk motoru, veri üretimi, vaka deposu ve yönetim katmanı yeniden yazıldı.
+Streamlit üzerinde çalışan 14 süreçli sentetik iç kontrol demosu. Ana ekranlar ve senaryo kataloğu, masaüstündeki BASLAT.bat ile açılan uygulamadan aktarılmıştır. Başlatmak için Python 3.12 ile `pip install -r requirements.txt` ve `streamlit run app.py` komutlarını çalıştırın.
 
-Risk panosu, işlem listesi, vaka detayı, yönetici raporu, vaka asistanı, kural yönetimi ve sistem yönetimi aynı veri kümesini kullanır. Risk sonuçları örnek niteliğindedir. Yerel asistan şablon tabanlıdır.
+Her ziyaretçi ayrı, geçici bir demo çalışma alanında yönetici olarak başlar. Gerçek müşteri verileri yerine sentetik veya örnek veri kullanın. Önceki yedi ekranlı sürüm ve ona ait yedekler `?view=classic` adresinde açılır. Ana sürümün veritabanı yedeği parola, API anahtarı ve MFA doğrulama kayıtlarını dışarıda bırakır.
 
-Her ziyaretçi kendi geçici SQLite çalışma alanında demo yöneticisi olarak başlar. Bu alanda inceleyen ve görüntüleyen hesapları oluşturulabilir. Görüntüleyen rolü maskelenmiş müşteri kimlikleriyle çalışır. Parola doğrulamasında her kullanıcı için ayrı salt ve PBKDF2 kullanılır. Oturum sona erdiğinde kayıtlar kaybolur. Dışa aktarılan yedek parola doğrulama bilgilerini içermez.
-
-CSV ve Excel içe aktarma, örnek veri kümesindeki transaction_id değerlerinden bir alt küme seçer. Gerçek müşteri, banka veya dış model bağlantısı kullanılmaz. Demo notlarına yalnızca örnek içerik girilmelidir.
-
-Yerelde başlatmak için Python 3.12 ile `pip install -r requirements.txt` ve `streamlit run app.py` komutlarını çalıştırın.
-
-## Sonraki oturumda devam etme
-
-Sistem yönetimi sekmesinde demo veritabanı yedeğini indir. Yeni bir oturumda **Yedekten devam et** altında bu dosyayı seç, çalışma alanının değişmesini onayla ve **Yedeği geri yükle** düğmesine bas. Kurallar, vaka durumları ve notları, kullanıcı adları ve roller ile kayıtlı denetim izi geri gelir. Yedekten gelen kullanıcılar için yönetici yeni bir demo parolası belirleyebilir. Geçersiz bir yedek mevcut çalışma alanını değiştirmez.
-
-Yeni oturumlar sağlanan V3–V6 risk motoru, özgün sentetik veri üreticisi ve kaynak koddaki varsayılan eşik/ağırlıklarla açılır. Demo, standart sütun isimlerini kullanır. Veri sözlüğü için yalnızca bu sütunları destekleyen bir uyumluluk modülü vardır. Önceki web demosundan alınan bir yedek açıldığında eski veri kümesi ve eski puanlama birlikte kullanılır.
+Adaptif kontrolün yerel modu anahtarsız çalışır. Harici model için sunucu tarafında ayrıca yapılandırma gerekir. Entegrasyon ve API yönetimi ekranları örnek tanımları yönetir. BASLAT_API.bat tarafından ayrı başlatılan HTTP servisi bu Streamlit dağıtımına dahil değildir.
