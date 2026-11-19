@@ -20,6 +20,7 @@ from suite.data_dictionary import field_label, rename_for_display, turkish_colum
 from suite.data_mapping import suggest_mapping, mapping_dict, apply_mapping, missing_required
 from suite.expanded_scenarios import optional_fields as expanded_optional_fields, enrich_process_demo, apply_expanded_scenarios, scenario_catalog, transaction_types
 from suite.adaptive_ai import api_available as ai_api_available, model_name as ai_model_name, dataset_schema as adaptive_dataset_schema, rule_from_text, run_rule, ask_dataset, safe_record as ai_safe_record
+from suite.platform_store import pause_dynamic_scenario, scenario_package, restore_scenario_package
 from suite.v10_features import OPERATORS, apply_dynamic_scenarios, quality_report, scenario_mask, scenario_performance
 from suite.v11_operations import case_pdf, sla_notifications
 from suite.v14_store import set_tenant as set_v14_tenant, create_dataset, list_datasets, load_dataset, import_dataset, rollback_batch, list_imports, create_api_key, list_api_keys, revoke_api_key, save_integration, list_integrations
@@ -964,18 +965,43 @@ if admin:
         st.subheader("Kod Yazmadan Senaryo Stüdyosu")
         st.caption(f"Aktif süreç: {tr_text(active_process)} · Koşulları oluşturun, mevcut veri üzerinde test edin, taslak kaydedin veya yayımlayın.")
         scenario_rows=list_dynamic_scenarios(active_process);scenario_keys=scenario_rows.scenario_key.drop_duplicates().tolist() if len(scenario_rows) else []
-        selected_key=st.selectbox("Çalışılacak senaryo",["Yeni senaryo"]+scenario_keys,format_func=lambda x:x if x=="Yeni senaryo" else scenario_rows[scenario_rows.scenario_key==x].iloc[0]["name"])
+        if message := st.session_state.pop("studio_notice", None):
+            st.success(message)
+        with st.expander("Senaryo dosyasını kaydet veya geri yükle"):
+            st.caption("Bu süreçte oluşturduğunuz senaryoları, sürümlerini ve etkinlik durumlarını kaydeder. Demo oturumu geçicidir. Son düzenlemeden sonra güncel dosyayı indirin.")
+            package = scenario_package(active_process)
+            st.download_button("Güncel senaryo dosyasını indir", json.dumps(package, ensure_ascii=False, indent=2),
+                               f"senaryolar_{active_process.replace('/', '-')}_{datetime.now():%Y%m%d}.json", "application/json",
+                               disabled=not package["versions"])
+            uploaded_package = st.file_uploader("Kayıtlı senaryo dosyası", type=["json"], key=f"studio_import_{active_process}")
+            if st.button("Dosyadan geri yükle", disabled=uploaded_package is None):
+                try:
+                    if uploaded_package.size > 8 * 1024 * 1024:
+                        raise ValueError("Senaryo dosyası 8 MB sınırını aşıyor.")
+                    added = restore_scenario_package(json.loads(uploaded_package.getvalue()), active_process, user["username"])
+                    st.session_state.studio_notice = f"{added} sürüm geri yüklendi." if added else "Bu dosyadaki sürümler zaten mevcut."
+                    st.rerun()
+                except (ValueError, TypeError, OverflowError, RecursionError) as error:
+                    st.error(f"Dosya yüklenemedi. {error}")
+        picker_key = f"studio_picker_{active_process}"
+        new_key = st.session_state.pop("studio_selection", None)
+        if new_key in scenario_keys:
+            st.session_state[picker_key] = new_key
+        selected_key=st.selectbox("Çalışılacak senaryo",["Yeni senaryo"]+scenario_keys,key=picker_key,format_func=lambda x:x if x=="Yeni senaryo" else scenario_rows[scenario_rows.scenario_key==x].iloc[0]["name"])
         current=None
         if selected_key!="Yeni senaryo":
             versions=scenario_rows[scenario_rows.scenario_key==selected_key];version_id=st.selectbox("Sürüm",versions.id.tolist(),format_func=lambda i:f"v{int(versions[versions.id==i].iloc[0].version)} · {versions[versions.id==i].iloc[0].status}");current=versions[versions.id==version_id].iloc[0]
         available_fields=list(required_fields)+list(optional_fields);operator_names=list(OPERATORS)
-        with st.form("dynamic_scenario_editor"):
+        existing=json.loads(current["conditions_json"]) if current is not None else []
+        available_fields = list(dict.fromkeys(available_fields + [condition["field"] for condition in existing]))
+        editor_key = f"{active_process}_{selected_key}_{int(current['id']) if current is not None else 0}"
+        condition_count = st.number_input("Koşul sayısı", min_value=1, max_value=max(20,len(existing)), value=max(1,len(existing)), key=f"condition_count_{editor_key}")
+        with st.form(f"dynamic_scenario_editor_{editor_key}"):
             name=st.text_input("Senaryo adı",value="" if current is None else current["name"]);description=st.text_area("Açıklama",value="" if current is None else current["description"],height=70);logic=st.radio("Koşulların bağlantısı",["VE","VEYA"],horizontal=True,index=0 if current is None or current["logic"]=="VE" else 1)
-            existing=json.loads(current["conditions_json"]) if current is not None else []
             conditions=[]
-            for idx in range(3):
-                enabled=st.checkbox(f"{idx+1}. koşulu kullan",value=idx<len(existing),key=f"cond_enabled_{selected_key}_{idx}")
-                cols=st.columns([1.5,1.3,1.2]);old=existing[idx] if idx<len(existing) else {};field=cols[0].selectbox(f"{idx+1}. alan",available_fields,format_func=field_label,index=available_fields.index(old["field"]) if old.get("field") in available_fields else 0,key=f"cond_field_{selected_key}_{idx}");op_code=old.get("operator",">");op_name=next((k for k,v in OPERATORS.items() if v==op_code),"Büyüktür");operator=cols[1].selectbox(f"{idx+1}. karşılaştırma",operator_names,index=operator_names.index(op_name),key=f"cond_op_{selected_key}_{idx}");value=cols[2].text_input(f"{idx+1}. değer",value=str(old.get("value","")),key=f"cond_value_{selected_key}_{idx}",disabled=OPERATORS[operator] in ["empty","not_empty"])
+            for idx in range(condition_count):
+                enabled=st.checkbox(f"{idx+1}. koşulu kullan",value=True,key=f"cond_enabled_{editor_key}_{idx}")
+                cols=st.columns([1.5,1.3,1.2]);old=existing[idx] if idx<len(existing) else {};field=cols[0].selectbox(f"{idx+1}. alan",available_fields,format_func=field_label,index=available_fields.index(old["field"]) if old.get("field") in available_fields else 0,key=f"cond_field_{editor_key}_{idx}");op_code=old.get("operator",">");op_name=next((k for k,v in OPERATORS.items() if v==op_code),"Büyüktür");operator=cols[1].selectbox(f"{idx+1}. karşılaştırma",operator_names,index=operator_names.index(op_name),key=f"cond_op_{editor_key}_{idx}");value=cols[2].text_input(f"{idx+1}. değer",value=str(old.get("value","")),key=f"cond_value_{editor_key}_{idx}")
                 if enabled:conditions.append({"field":field,"operator":OPERATORS[operator],"value":value})
             points=st.slider("Risk puanı",1,100,int(current["points"]) if current is not None else 20);reason=st.text_input("Risk gerekçesi",value="" if current is None else current["reason"]);action=st.text_area("Önerilen kontrol aksiyonu",value="" if current is None else current["action"],height=80)
             test_clicked=st.form_submit_button("Mevcut veride test et");draft_clicked=st.form_submit_button("Taslak olarak kaydet");publish_clicked=st.form_submit_button("Yeni sürümü yayımla",type="primary")
@@ -984,10 +1010,16 @@ if admin:
             if conditions and matched.any():st.dataframe(rename_for_display(active_df.loc[matched].head(50)),hide_index=True,width="stretch")
         if draft_clicked or publish_clicked:
             try:
-                key="" if selected_key=="Yeni senaryo" else selected_key;version=save_dynamic_scenario(key,active_process,name,description,logic,conditions,points,reason,action,user["username"],publish_clicked);st.cache_data.clear();st.success(f"Senaryo v{version} {'yayımlandı' if publish_clicked else 'taslak olarak kaydedildi'}.");st.rerun()
+                from uuid import uuid4
+                key=uuid4().hex if selected_key=="Yeni senaryo" else selected_key;version=save_dynamic_scenario(key,active_process,name,description,logic,conditions,points,reason,action,user["username"],publish_clicked);st.session_state.studio_selection=key;st.session_state.studio_notice=f"{name} · v{version} {'yayımlandı' if publish_clicked else 'taslak olarak kaydedildi'}. Güncel dosyayı indirebilirsiniz.";st.rerun()
             except Exception as e:st.error(str(e))
-        if current is not None and current["status"]!="YAYINDA":
-            if st.button("Seçili eski/taslak sürümü yayımla",width="stretch"):publish_dynamic_scenario(int(current["id"]),user["username"]);st.cache_data.clear();st.rerun()
+        if current is not None and current["active"]:
+            if st.button("Senaryoyu analizden çıkar", help="Bu sürümün puanlamasını durdurur. Daha sonra yeniden etkinleştirebilirsiniz."):
+                pause_dynamic_scenario(selected_key, active_process, user["username"])
+                st.session_state.studio_notice = f"{current['name']} analizden çıkarıldı."
+                st.rerun()
+        if current is not None and not current["active"]:
+            if st.button("Seçili sürümü etkinleştir",width="stretch"):publish_dynamic_scenario(int(current["id"]),user["username"]);st.cache_data.clear();st.rerun()
         st.markdown("#### Sürüm geçmişi")
         if len(scenario_rows):
             version_table=scenario_rows[["name","version","logic","points","status","active","created_by","created_at"]].copy();version_table.columns=["Senaryo","Sürüm","Bağlantı","Puan","Durum","Aktif","Oluşturan","Tarih"];version_table["Aktif"]=version_table["Aktif"].map({1:"Evet",0:"Hayır"});st.dataframe(version_table,hide_index=True,width="stretch")
