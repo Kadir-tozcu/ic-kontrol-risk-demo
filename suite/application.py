@@ -13,7 +13,8 @@ import pandas as pd
 import streamlit as st
 
 from suite.case_store import CASE_STATUSES, get_case, load_cases, save_case, add_case_comment, list_case_comments, add_case_evidence, list_case_evidence, get_case_evidence, bulk_update_cases, bulk_create_cases, save_case_workflow, submit_for_approval, approval_decision, get_checklist, update_checklist, merge_cases, list_workflow_log, set_tenant as set_case_tenant
-from suite.platform_store import ROLES, authenticate, backup_bytes, create_custom_rule, create_user, get_audit, get_process_rule_overrides, get_rules, has_users, list_custom_rules, list_users, log_event, save_process_rule_override, save_rules, set_custom_rule_active, list_dynamic_scenarios, save_dynamic_scenario, publish_dynamic_scenario, record_upload, list_upload_history, get_organization_settings, save_organization_settings, save_filter, list_saved_filters, delete_saved_filter, set_tenant as set_platform_tenant, create_organization, list_organizations, change_password, get_data_mapping, save_data_mapping, record_analysis_run, list_analysis_runs
+from suite.control_review import decide_review, draw_sample, request_review, review_history
+from suite.platform_store import ROLES, authenticate, backup_bytes, create_custom_rule, create_user, get_audit, get_process_rule_overrides, get_rules, has_users, list_custom_rules, list_users, log_event, save_process_rule_override, save_rules, set_custom_rule_active, list_dynamic_scenarios, save_dynamic_scenario, record_upload, list_upload_history, get_organization_settings, save_organization_settings, save_filter, list_saved_filters, delete_saved_filter, set_tenant as set_platform_tenant, create_organization, list_organizations, change_password, get_data_mapping, save_data_mapping, record_analysis_run, list_analysis_runs
 from suite.risk_engine import OPTIONAL_COLUMNS, REQUIRED_COLUMNS, score_transactions
 from suite.synthetic_data import generate_synthetic_data
 from suite.process_modules import PROCESS_DEFINITIONS, generate_process_demo, score_process
@@ -21,7 +22,7 @@ from suite.data_dictionary import field_label, rename_for_display, turkish_colum
 from suite.data_mapping import suggest_mapping, mapping_dict, apply_mapping, missing_required
 from suite.expanded_scenarios import optional_fields as expanded_optional_fields, enrich_process_demo, apply_expanded_scenarios, scenario_catalog, transaction_types
 from suite.adaptive_ai import api_available as ai_api_available, model_name as ai_model_name, dataset_schema as adaptive_dataset_schema, rule_from_text, run_rule, ask_dataset, safe_record as ai_safe_record
-from suite.platform_store import pause_dynamic_scenario, scenario_package, restore_scenario_package
+from suite.platform_store import scenario_package, restore_scenario_package
 from suite.v10_features import OPERATORS, apply_dynamic_scenarios, quality_report, scenario_mask, scenario_performance
 from suite.v11_operations import case_pdf, sla_notifications
 from suite.v14_store import set_tenant as set_v14_tenant, create_dataset, list_datasets, load_dataset, import_dataset, rollback_batch, list_imports, create_api_key, list_api_keys, revoke_api_key, save_integration, list_integrations
@@ -397,6 +398,29 @@ def return_to_origin(origin):
 if page=="Operasyon merkezi":
     st.subheader(f"{organization['organization_name']} · Operasyon Merkezi")
     st.caption(f"{tr_text(active_process)} sürecinin güncel kontrol görünümü")
+    if user["role"] in ("Yonetici","Onaylayan"):
+        history = review_history(active_process)
+        if not history.empty:
+            with st.expander("Senaryo onayları", expanded=history.status.eq("Bekliyor").any().item()):
+                for request in history.itertuples():
+                    st.markdown(f"**{request.name} · v{request.version} · {request.action}**")
+                    st.write(f"{request.status} · Talep eden: {request.maker} · {request.requested_at} UTC")
+                    st.write(request.justification)
+                    st.write(json.loads(request.evidence))
+                    st.caption(f"{request.logic} · +{request.points} puan")
+                    st.dataframe(pd.DataFrame(json.loads(request.conditions_json)), hide_index=True)
+                    if request.status != "Bekliyor":
+                        st.caption(f"Karar veren: {request.reviewer} · {request.decided_at} UTC")
+                    elif user["username"] == request.maker or (request.action == "Etkinleştir" and user["username"] == request.created_by):
+                        st.caption("Karar için aynı demo oturumunda başka bir yönetici veya onaylayan hesabıyla giriş yapın.")
+                    else:
+                        for col, label, decision in zip(st.columns(2), ["Onayla","Reddet"], [True,False]):
+                            if col.button(label,key=f"decision_{request.id}_{decision}"):
+                                try:
+                                    decide_review(request.id, user["username"], decision)
+                                    st.rerun()
+                                except ValueError as error:
+                                    st.error(str(error))
     st.subheader("Bugünkü işlerim")
     for column, (label, mask) in zip(st.columns(len(work_queues)), work_queues.items()):
         column.button(f"{label} · {int(mask.sum())}", on_click=enter_queue, args=(label,), width="stretch")
@@ -760,6 +784,30 @@ if page=="Vaka detayı":
         if timeline.empty:st.caption("Henüz iş akışı hareketi bulunmuyor.")
         else:st.dataframe(timeline.rename(columns={"created_at":"Tarih","actor":"Kullanıcı","action":"İşlem","detail":"Açıklama"}),hide_index=True,width="stretch")
 if page=="Yönetici raporu":
+    st.subheader("Kontrol örneklemi")
+    st.caption("Yüksek riskli kayıtlar puana göre, orta ve düşük riskli kayıtlar rastgele seçilir. Aynı veri, filtre ve seçim numarası aynı örneklemi üretir.")
+    dates = pd.to_datetime(active_df[active_date],errors="coerce").dt.date
+    if dates.notna().any():
+        branch_options = sorted(active_df["branch_id"].dropna().astype(str).unique()) if "branch_id" in active_df else []
+        branch = st.selectbox("Örneklem şubesi",[None,*branch_options],format_func=lambda value:value or "Tüm şubeler",key=f"sample_branch_{active_process}")
+        period = st.date_input("Örneklem dönemi",(dates.dropna().min(),dates.dropna().max()),key=f"sample_dates_{active_process}")
+        if len(period) == 2:
+            pool = active_df.loc[dates.between(*period)]
+            if branch is not None:
+                pool = pool.loc[pool.branch_id.astype(str).eq(branch)]
+            levels = ["YUKSEK","ORTA","DUSUK"]
+            controls = st.columns(4)
+            quotas = {level:int(col.number_input(label,min_value=0,max_value=1000,value=10)) for col,level,label in zip(controls,levels,["Yüksek risk adedi","Orta risk adedi","Düşük risk adedi"])}
+            seed = int(controls[3].number_input("Seçim numarası",min_value=0,max_value=999999,value=42))
+            sample = draw_sample(pool,active_id,quotas,seed)
+            st.caption(f"Filtreye uyan {len(pool)} kayıttan {len(sample)} kayıt seçildi. Bir risk grubunda yeterli kayıt yoksa o grubun tamamı alınır.")
+            if not sample.empty:
+                fields = [x for x in [active_id,active_date,"branch_id","risk_level","risk_score","case_status"] if x in sample]
+                display = rename_for_display(sample[fields])
+                case_table(sample,display,"sample_rows","Yönetici raporu",300)
+                st.download_button("Örneklemi CSV olarak indir",display.to_csv(index=False).encode("utf-8-sig"),"kontrol_orneklemi.csv","text/csv")
+    else:
+        st.info("Örneklem için geçerli tarih içeren kayıt gereklidir.")
     process_cases=cases[~cases.transaction_id.astype(str).str.contains(":",regex=False)].copy() if active_process=="Para Transferleri" else cases[cases.transaction_id.astype(str).str.startswith(active_process+":")].copy();confirmed=int((process_cases.status=="Risk dogrulandi").sum()) if len(process_cases) else 0;false=int((process_cases.status=="Yanlis alarm").sum()) if len(process_cases) else 0
     for col,(label,value) in zip(st.columns(4),[("İşleme alınan",len(process_cases)),("Risk doğrulandı",confirmed),("Yanlış alarm",false),("Kararlarda yanlış alarm",f"%{false/(confirmed+false)*100:.1f}" if confirmed+false else "Karar yok")]):col.metric(label,value)
     if len(process_cases):st.subheader("İnceleyen bazında iş yükü");st.bar_chart(process_cases.analyst.replace("","Atanmamış").value_counts(),horizontal=True)
@@ -807,9 +855,7 @@ if page=="Adaptif kontrol":
                 save_col,publish_col=st.columns(2)
                 if save_col.button("Taslak senaryo olarak kaydet",width="stretch",key=f"save_adaptive_{active_process}"):
                     version=save_dynamic_scenario("",active_process,adaptive_rule["name"],adaptive_rule["description"],adaptive_rule["logic"],adaptive_rule["conditions"],adaptive_rule["points"],adaptive_rule["reason"],adaptive_rule["action"],user["username"],False);st.success(f"Senaryo v{version} taslak olarak kaydedildi.")
-                if publish_col.button("Yayımla ve sonraki analizlerde çalıştır",type="primary",width="stretch",disabled=not admin,key=f"publish_adaptive_{active_process}"):
-                    version=save_dynamic_scenario("",active_process,adaptive_rule["name"],adaptive_rule["description"],adaptive_rule["logic"],adaptive_rule["conditions"],adaptive_rule["points"],adaptive_rule["reason"],adaptive_rule["action"],user["username"],True);st.cache_data.clear();st.success(f"Senaryo v{version} yayımlandı.");st.rerun()
-                if not admin:st.caption("Yayımlama yetkisi yalnızca yönetici rolündedir; diğer yetkili kullanıcılar taslak oluşturabilir.")
+                st.caption("Taslak sürümler Senaryo stüdyosundan ikinci hesap onayına gönderilir.")
         except Exception as e:st.error(f"Kontrol çalıştırılamadı: {e}")
     st.divider();st.markdown("### 💬 Veriye anlık soru sor")
     st.caption("ChatGPT'ye ham dosyanın tamamı yerine maskelenmiş ve özetlenmiş veri bağlamı gönderilir. Yanıt karar değil, inceleme desteğidir.")
@@ -1001,7 +1047,7 @@ if admin:
         if message := st.session_state.pop("studio_notice", None):
             st.success(message)
         with st.expander("Senaryo dosyasını kaydet veya geri yükle"):
-            st.caption("Bu süreçte oluşturduğunuz senaryoları, sürümlerini ve etkinlik durumlarını kaydeder. Demo oturumu geçicidir. Son düzenlemeden sonra güncel dosyayı indirin.")
+            st.caption("Bu süreçte oluşturduğunuz senaryoları, sürümlerini ve etkinlik durumlarını kaydeder. İçeri aktarılan yeni sürümler taslak olarak açılır. Demo oturumu geçicidir. Son düzenlemeden sonra güncel dosyayı indirin.")
             package = scenario_package(active_process)
             st.download_button("Güncel senaryo dosyasını indir", json.dumps(package, ensure_ascii=False, indent=2),
                                f"senaryolar_{active_process.replace('/', '-')}_{datetime.now():%Y%m%d}.json", "application/json",
@@ -1094,19 +1140,19 @@ if admin:
                 alternative = st.text_input("Alternatif eşik", key=f"alternative_{editor_key}_{compare_index}").strip().replace(",", ".")
             test_clicked = st.button("Mevcut veride test et")
             draft_clicked = st.button("Taslak olarak kaydet")
-            publish_clicked = st.button("Yeni sürümü yayımla",type="primary")
+
         if not conditions:
             issues.append("En az bir koşulu etkinleştirin.")
-        if (draft_clicked or publish_clicked) and not all(text.strip() for text in (name,reason,action)):
+        if draft_clicked and not all(text.strip() for text in (name,reason,action)):
             issues.append("Senaryo adını, risk gerekçesini ve önerilen kontrol aksiyonunu doldurun.")
         if test_clicked and compare_index is not None:
             from math import isfinite
             if not isfinite(pd.to_numeric(alternative, errors="coerce")):
                 issues.append("Karşılaştırma için geçerli bir alternatif eşik girin.")
-        if issues and (test_clicked or draft_clicked or publish_clicked):
+        if issues and (test_clicked or draft_clicked):
             for problem in issues:
                 st.error(problem)
-            test_clicked = draft_clicked = publish_clicked = False
+            test_clicked = draft_clicked = False
         new_key_slot = f"studio_new_rule_{active_process}"
         if selected_key == "Yeni senaryo" and new_key_slot not in st.session_state:
             st.session_state[new_key_slot] = uuid4().hex
@@ -1203,17 +1249,29 @@ if admin:
                 st.dataframe(details.loc[ordered].head(50), hide_index=True, width="stretch")
             else:
                 st.info("Bu veri setinde koşullara uyan veya puanı değişen kayıt bulunamadı.")
-        if draft_clicked or publish_clicked:
+        if draft_clicked:
             try:
-                key=candidate_key;version=save_dynamic_scenario(key,active_process,name,description,logic,conditions,points,reason,action,user["username"],publish_clicked);st.session_state.pop(new_key_slot,None);st.session_state.studio_selection=key;st.session_state.studio_notice=f"{name} · v{version} {'yayımlandı' if publish_clicked else 'taslak olarak kaydedildi'}. Güncel dosyayı indirebilirsiniz.";st.rerun()
+                key=candidate_key;version=save_dynamic_scenario(key,active_process,name,description,logic,conditions,points,reason,action,user["username"],False);st.session_state.pop(new_key_slot,None);st.session_state.studio_selection=key;st.session_state.studio_notice=f"{name} · v{version} taslak olarak kaydedildi. Güncel dosyayı indirebilirsiniz.";st.rerun()
             except Exception as e:st.error(str(e))
-        if current is not None and current["active"]:
-            if st.button("Senaryoyu analizden çıkar", help="Bu sürümün puanlamasını durdurur. Daha sonra yeniden etkinleştirebilirsiniz."):
-                pause_dynamic_scenario(selected_key, active_process, user["username"])
-                st.session_state.studio_notice = f"{current['name']} analizden çıkarıldı."
-                st.rerun()
-        if current is not None and not current["active"]:
-            if st.button("Seçili sürümü etkinleştir",width="stretch"):publish_dynamic_scenario(int(current["id"]),user["username"]);st.cache_data.clear();st.rerun()
+        if current is not None:
+            st.subheader("Kaydedilmiş sürüm için onay talebi")
+            change = "Durdur" if current["active"] else "Etkinleştir"
+            st.caption(f"{current['name']} · v{current['version']} · {change}. Formdaki düzenlemeleri kullanmak için önce yeni bir taslak kaydedin.")
+            justification = st.text_input("Değişiklik gerekçesi", key=f"justification_{current['id']}")
+            if st.button("Etkiyi test et ve onaya gönder", disabled=not justification.strip() or source_pending):
+                others = published_scenarios[published_scenarios.scenario_key != selected_key]
+                proposed = others if current["active"] else pd.concat([others,current.to_frame().T],ignore_index=True).sort_values("scenario_key")
+                try:
+                    result = apply_dynamic_scenarios(base_scores, proposed)
+                    evidence = {"Veri kaynağı":source_label, "Taranan kayıt":len(result),
+                                "Puanı değişen":int(result.risk_score.ne(active_df.risk_score).sum()),
+                                "Önce yüksek risk":int(active_df.risk_level.eq("YUKSEK").sum()),
+                                "Sonra yüksek risk":int(result.risk_level.eq("YUKSEK").sum())}
+                    request_review(int(current["id"]), change, justification, evidence, user["username"])
+                    st.session_state.studio_notice = "Talep gönderildi. İkinci hesap Operasyon merkezinden karar verebilir."
+                    st.rerun()
+                except ValueError as error:
+                    st.error(str(error))
         st.markdown("#### Sürüm geçmişi")
         if len(scenario_rows):
             version_table=scenario_rows[["name","version","logic","points","status","active","created_by","created_at"]].copy();version_table.columns=["Senaryo","Sürüm","Bağlantı","Puan","Durum","Aktif","Oluşturan","Tarih"];version_table["Aktif"]=version_table["Aktif"].map({1:"Evet",0:"Hayır"});st.dataframe(version_table,hide_index=True,width="stretch")

@@ -259,19 +259,10 @@ def save_dynamic_scenario(scenario_key: str, process: str, name: str, descriptio
     key=scenario_key.strip() or secrets.token_hex(6);now=datetime.now().isoformat(timespec="seconds")
     with connect() as conn:
         version=int(conn.execute("SELECT COALESCE(MAX(version),0)+1 FROM dynamic_scenarios WHERE scenario_key=?",(key,)).fetchone()[0])
-        if publish:conn.execute("UPDATE dynamic_scenarios SET active=0 WHERE scenario_key=? AND tenant_id=?",(key,current_tenant()))
+        if publish: raise ValueError("Yayına alma için ikinci hesap onayı gereklidir.")
         conn.execute("INSERT INTO dynamic_scenarios(scenario_key,version,process,name,description,logic,conditions_json,points,reason,action,status,active,created_by,created_at,tenant_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(key,version,process,name.strip(),description.strip(),logic,json.dumps(conditions,ensure_ascii=False),int(points),reason.strip(),action.strip(),"YAYINDA" if publish else "TASLAK",int(publish),username,now,current_tenant()))
     log_event(username,"SENARYO_YAYINLA" if publish else "SENARYO_TASLAK","dynamic_scenario",f"{key}:v{version}",name)
     return version
-
-
-def publish_dynamic_scenario(row_id: int, username: str) -> None:
-    with connect() as conn:
-        row=conn.execute("SELECT scenario_key,version,name FROM dynamic_scenarios WHERE id=? AND tenant_id=?",(int(row_id),current_tenant())).fetchone()
-        if not row:raise ValueError("Senaryo sürümü bulunamadı.")
-        conn.execute("UPDATE dynamic_scenarios SET active=0 WHERE scenario_key=? AND tenant_id=?",(row[0],current_tenant()))
-        conn.execute("UPDATE dynamic_scenarios SET active=1,status='YAYINDA' WHERE id=? AND tenant_id=?",(int(row_id),current_tenant()))
-    log_event(username,"SENARYO_YAYINLA","dynamic_scenario",f"{row[0]}:v{row[1]}",row[2])
 
 
 def record_upload(username: str, process: str, file_name: str, file_hash: str,
@@ -335,13 +326,6 @@ def list_organizations() -> pd.DataFrame:
     with connect() as conn:return pd.read_sql_query("SELECT tenant_id,name,active,created_at FROM organizations ORDER BY name",conn)
 
 
-def pause_dynamic_scenario(key, process, username):
-    with connect() as conn:
-        conn.execute("UPDATE dynamic_scenarios SET active=0, status='PASIF' WHERE tenant_id=? AND process=? AND scenario_key=? AND active=1",
-                     (current_tenant(), process, key))
-    log_event(username, "SENARYO_PASIF", "dynamic_scenario", key, process)
-
-
 SCENARIO_FIELDS = ["scenario_key", "version", "name", "description", "logic", "points", "reason", "action", "status", "active"]
 
 
@@ -392,13 +376,13 @@ def restore_scenario_package(package, process, username):
             stored = conn.execute("SELECT * FROM dynamic_scenarios WHERE scenario_key=?", (key,)).fetchall()
             for old in stored:
                 item = by_version.get(old["version"])
-                if old["tenant_id"] != current_tenant() or old["process"] != process or item is None or any(old[k] != item[k] for k in SCENARIO_FIELDS) or json.loads(old["conditions_json"]) != item["conditions"]:
+                if old["tenant_id"] != current_tenant() or old["process"] != process or item is None or any(old[k] != item[k] for k in SCENARIO_FIELDS if k not in ("active","status")) or json.loads(old["conditions_json"]) != item["conditions"]:
                     raise ValueError("Aynı senaryonun farklı bir sürümü bu oturumda mevcut. Yedeği boş bir oturumda açın.")
             saved = {old["version"] for old in stored}
             for version, item in by_version.items():
                 if version in saved:
                     continue
-                values = [item[k] for k in SCENARIO_FIELDS]
+                values = [dict(item, status="TASLAK", active=0)[k] for k in SCENARIO_FIELDS]
                 conn.execute(f"INSERT INTO dynamic_scenarios ({','.join(SCENARIO_FIELDS)},conditions_json,process,tenant_id,created_by,created_at) VALUES ({','.join(['?']*15)})",
                              (*values,json.dumps(item["conditions"],ensure_ascii=False),process,current_tenant(),username,datetime.now().isoformat(timespec="seconds")))
                 added += 1
