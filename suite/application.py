@@ -21,7 +21,7 @@ from suite.process_modules import PROCESS_DEFINITIONS, generate_process_demo, sc
 from suite.data_dictionary import field_label, rename_for_display, turkish_columns
 from suite.data_mapping import suggest_mapping, mapping_dict, apply_mapping, missing_required
 from suite.expanded_scenarios import optional_fields as expanded_optional_fields, enrich_process_demo, apply_expanded_scenarios, scenario_catalog, transaction_types
-from suite.adaptive_ai import api_available as ai_api_available, model_name as ai_model_name, dataset_schema as adaptive_dataset_schema, rule_from_text, run_rule, ask_dataset, safe_record as ai_safe_record
+from suite.adaptive_ai import read_scenario_text, api_available as ai_api_available, model_name as ai_model_name, dataset_schema as adaptive_dataset_schema, rule_from_text, run_rule, ask_dataset, safe_record as ai_safe_record
 from suite.platform_store import scenario_package, restore_scenario_package
 from suite.v10_features import OPERATORS, apply_dynamic_scenarios, quality_report, scenario_mask, scenario_performance
 from suite.v11_operations import case_pdf, sla_notifications
@@ -1114,7 +1114,7 @@ if admin:
                 terms, reason_text, action_text = options[template]
                 defaults.update(name=template, reason=reason_text, action=action_text)
                 existing = [dict(field=field, operator=op, value=value) for field, op, value in terms]
-        available_fields = list(dict.fromkeys(list(required_fields) + list(optional_fields) + [c["field"] for c in existing]))
+        available_fields = list(dict.fromkeys(list(required_fields) + list(optional_fields) + list(base_scores.columns) + [c["field"] for c in existing]))
         editor_key = f"{active_process}_{selected_key}_{defaults.get('id', template)}"
         # Keep stable row identities while adding, copying or removing a condition.
         if st.session_state.get("studio_layout_owner") != editor_key or f"name_{editor_key}" not in st.session_state:
@@ -1122,6 +1122,29 @@ if admin:
             st.session_state.studio_rows = {uuid4().hex: item for item in (existing or [{}])}
         rows = st.session_state.studio_rows
         row_limit = max(20, len(existing))
+        with st.expander("Senaryoyu elle yaz"):
+            st.caption("Her koşulu ayrı satıra yaz. Alanın Türkçe adını veya teknik adını kullanabilirsin. Yazdığın koşullar forma aktarıldığında mevcut koşulların yerini alır. Yalnızca başlık girersen koşullar korunur.")
+            example_field = "age" if "age" in base_scores else active_id
+            example = f"Ad: Yeni kontrol\n{field_label(example_field)} " + ("en az 65" if example_field == "age" else "boş değil") + "\nPuan: 25"
+            st.text("Örnek\n" + example)
+            st.caption("İsteğe bağlı başlıklar: Ad, Açıklama, Bağlantı (VE veya VEYA), Puan, Gerekçe ve Aksiyon. Karşılaştırmalar: =, !=, >, >=, <, <=, en az, en fazla, içerir, boş, boş değil. Ondalık ayırıcı virgüldür.")
+            with st.expander("Bu veride kullanılabilecek alanlar"):
+                st.dataframe(pd.DataFrame([{"Alan":field_label(f),"Teknik ad":f} for f in base_scores.columns]),hide_index=True,width="stretch")
+            typed = st.text_area("Senaryo metni", max_chars=12000, height=160, key=f"typed_{editor_key}")
+            if typed.strip():
+                details, parsed, problems = read_scenario_text(typed, base_scores.columns, row_limit)
+                for problem in problems:
+                    st.error(problem)
+                if not problems:
+                    if parsed:
+                        st.dataframe(pd.DataFrame([{"Alan":field_label(term["field"]), "Karşılaştırma":term["operator"], "Değer":term["value"]} for term in parsed]),hide_index=True,width="stretch")
+                    if st.button("Metni forma aktar",key=f"apply_text_{editor_key}"):
+                        for prop, val in details.items():
+                            st.session_state[f"{prop}_{editor_key}"] = val
+                        if parsed:
+                            rows = {uuid4().hex: term for term in parsed}
+                            st.session_state.studio_rows = rows
+                        st.success("Metin forma aktarıldı. Kural özetini inceleyebilir ve senaryoyu test edebilirsin.")
         with st.container(border=True):
             name = st.text_input("Senaryo adı", defaults.get("name", ""), key=f"name_{editor_key}")
             description = st.text_area("Açıklama", defaults.get("description", ""), height=70, key=f"desc_{editor_key}")
@@ -1157,7 +1180,10 @@ if admin:
             if st.button("＋ Koşul ekle", key=f"add_{editor_key}", disabled=len(rows) >= row_limit):
                 rows[uuid4().hex] = {}
                 st.rerun()
-            points = st.slider("Risk puanı",1,100,int(defaults.get("points",20)),key=f"points_{editor_key}")
+            points_key = f"points_{editor_key}"
+            if points_key not in st.session_state:
+                st.session_state[points_key] = int(defaults.get("points",20))
+            points = st.number_input("Risk puanı",1,100,key=points_key)
             reason = st.text_input("Risk gerekçesi", defaults.get("reason",""),key=f"reason_{editor_key}")
             action = st.text_area("Önerilen kontrol aksiyonu",defaults.get("action",""),height=80,key=f"action_{editor_key}")
             operator_text = {v:k.lower() for k,v in OPERATORS.items()}
