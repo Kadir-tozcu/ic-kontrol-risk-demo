@@ -595,6 +595,32 @@ if page=="Vaka detayı":
     amount_columns=[c for c in ["transaction_amount","loan_amount","amount","journal_amount","invoice_amount","payment_amount","deal_amount","exposure_amount"] if c in active_df.columns];amount_value=f"{float(row[amount_columns[0]]):,.2f} TL" if amount_columns and pd.notna(row[amount_columns[0]]) else "—";date_value=pd.to_datetime(row[active_date]).strftime("%d.%m.%Y %H:%M") if pd.notna(row.get(active_date)) else "—"
     facts=st.columns(4);fact_values=[("Süreç",tr_text(active_process)),("Kayıt tarihi",date_value),("İlgili tutar",amount_value),("Vaka durumu",case_status)]
     for col,(label,value) in zip(facts,fact_values):col.markdown(f'<div class="case-fact"><span>{escape(label)}</span><b>{escape(str(value))}</b></div>',unsafe_allow_html=True)
+    with st.expander("Müşterinin işlem zaman çizelgesi"):
+        customer_ids = base_scores.get("customer_id")
+        customer_id = customer_ids.loc[row.name] if customer_ids is not None else None
+        if pd.isna(customer_id) or not str(customer_id).strip():
+            st.info("Bu kayıtta müşteri numarası bulunmuyor.")
+        else:
+            related = active_df.loc[customer_ids.eq(customer_id)].sort_values([active_date, active_id])
+            st.caption(f"{tr_text(active_process)} · Seçili veri setinde aynı müşteriye ait {len(related)} kayıt.")
+            if len(related) == 1:
+                st.info("Bu süreçte müşteriye ait tek kayıt seçili vaka.")
+            else:
+                fields = [active_date, active_id, *amount_columns[:1], "risk_score", "risk_level", "case_status"]
+                events = related[fields].copy()
+                events["risk_level"] = events.risk_level.map(RISK_LABELS)
+                events["case_status"] = events.case_status.map(tr_text)
+                events.insert(0, "Vaka", related[active_id].astype(str).map(lambda value: "Seçili" if value == sid else ""))
+                st.dataframe(rename_for_display(events), hide_index=True, width="stretch")
+                record_ids = related[active_id].astype(str).tolist()
+                pos = record_ids.index(sid)
+                previous, following = st.columns(2)
+                if previous.button("Önceki müşteri kaydı", disabled=pos == 0, key=f"timeline_prev_{active_process}_{sid}"):
+                    st.session_state[f"pending_case_{active_process}"] = record_ids[pos - 1]
+                    st.rerun()
+                if following.button("Sonraki müşteri kaydı", disabled=pos == len(record_ids) - 1, key=f"timeline_next_{active_process}_{sid}"):
+                    st.session_state[f"pending_case_{active_process}"] = record_ids[pos + 1]
+                    st.rerun()
     st.progress(int(row.risk_score)/100,text=f"Risk yoğunluğu: %{int(row.risk_score)}")
     reasons=[tr_text(x) for x in str(row.risk_reasons).split(" | ") if x.strip()];actions=[tr_text(x) for x in str(row.recommended_actions).split(" | ") if x.strip()]
     def observed_number(field):
