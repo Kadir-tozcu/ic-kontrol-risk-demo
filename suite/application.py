@@ -1041,6 +1041,47 @@ if admin:
                 revoke_id=st.selectbox("İptal edilecek anahtar",active_keys.id.tolist(),format_func=lambda x:f"{active_keys[active_keys.id==x].iloc[0]['name']} · {active_keys[active_keys.id==x].iloc[0]['key_prefix']}…")
                 if st.button("Anahtarı iptal et",width="stretch"):revoke_api_key(revoke_id);log_event(user["username"],"API_ANAHTARI_IPTAL","api_key",str(revoke_id));st.session_state.pop("last_api_key",None);st.rerun()
     if page=="Senaryo stüdyosu":
+        studio_mode = st.radio("Çalışma biçimi", ["Metinle tara", "Gelişmiş düzenleyici"],
+                               horizontal=True, key="studio_mode")
+    if page=="Senaryo stüdyosu" and studio_mode == "Metinle tara":
+        st.subheader("Senaryonu yaz")
+        scope = f"{tenant_id}_{active_process}"
+        text_key = f"scan_text_{scope}"
+        example = ("Müşteri yaşı en az 65\nHareketsizlik günü en az 365" if active_process == "Para Transferleri"
+                   else "risk_score en az 70")
+        if text_key not in st.session_state:
+            st.session_state[text_key] = st.session_state.get(f"scan_draft_{scope}", example)
+        st.caption("Her satıra bir koşul yaz. Varsayılan olarak tüm koşullar birlikte aranır. Herhangi birinin eşleşmesi için ayrı bir satıra “Bağlantı: VEYA” yaz.")
+        query = st.text_area("Senaryo metni", key=text_key, height=150, max_chars=12000)
+        st.session_state[f"scan_draft_{scope}"] = query
+        scope_signature = (query, source, upload_hash, persistent_dataset_id)
+        result_key = f"scan_result_{scope}"
+        if source_pending:
+            st.info("Taramak için bir dosya veya veri seti seç.")
+        if st.button("Verileri tara", type="primary", disabled=source_pending):
+            st.session_state[result_key] = scope_signature
+        if not source_pending and st.session_state.get(result_key) == scope_signature:
+            details, terms, errors = read_scenario_text(query, active_df.columns)
+            if not terms and not errors:
+                errors.append("Taramak için en az bir koşul yaz.")
+            for message in errors:
+                st.error(message)
+            if not errors:
+                mask = scenario_mask(active_df, terms, details.get("logic", "VE"))
+                hits = active_df.loc[mask].sort_values("risk_score", ascending=False, kind="stable")
+                st.subheader(details.get("name") or "Tarama sonucu")
+                st.write(f"{source_label} · {len(active_df):,} kayıt tarandı, {len(hits):,} kayıt eşleşti.".replace(",", "."))
+                if len(hits):
+                    fields = list(dict.fromkeys([active_id, active_date, *[t["field"] for t in terms], "risk_score"]))
+                    display = rename_for_display(hits[fields])
+                    st.session_state.studio_return_fields = ["studio_mode", text_key]
+                    case_table(hits, display, f"scan_hits_{scope}", "Senaryo stüdyosu", 380)
+                    st.download_button("Eşleşen kayıtları indir",display.to_csv(index=False).encode("utf-8-sig"),"senaryo_eslesmeleri.csv","text/csv")
+                else:
+                    st.info("Bu koşulları karşılayan kayıt bulunamadı.")
+        with st.expander("Yazabileceğin alanlar"):
+            st.dataframe(pd.DataFrame([{"Alan":field_label(f), "Teknik adı":f} for f in active_df.columns]), hide_index=True)
+    if page=="Senaryo stüdyosu" and studio_mode == "Gelişmiş düzenleyici":
         st.subheader("Kod Yazmadan Senaryo Stüdyosu")
         st.caption(f"Aktif süreç: {tr_text(active_process)} · Koşulları oluşturun, mevcut veri üzerinde test edin, taslak kaydedin veya yayımlayın.")
         scenario_rows=list_dynamic_scenarios(active_process);scenario_keys=scenario_rows.scenario_key.drop_duplicates().tolist() if len(scenario_rows) else []
