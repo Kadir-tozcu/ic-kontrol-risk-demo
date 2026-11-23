@@ -21,7 +21,7 @@ from suite.process_modules import PROCESS_DEFINITIONS, generate_process_demo, sc
 from suite.data_dictionary import field_label, rename_for_display, turkish_columns
 from suite.data_mapping import suggest_mapping, mapping_dict, apply_mapping, missing_required
 from suite.expanded_scenarios import optional_fields as expanded_optional_fields, enrich_process_demo, apply_expanded_scenarios, scenario_catalog, transaction_types
-from suite.adaptive_ai import read_scenario_text, api_available as ai_api_available, model_name as ai_model_name, dataset_schema as adaptive_dataset_schema, rule_from_text, run_rule, ask_dataset, safe_record as ai_safe_record
+from suite.adaptive_ai import instant_filter, read_scenario_text, api_available as ai_api_available, model_name as ai_model_name, dataset_schema as adaptive_dataset_schema, rule_from_text, run_rule, ask_dataset, safe_record as ai_safe_record
 from suite.platform_store import scenario_package, restore_scenario_package
 from suite.v10_features import OPERATORS, apply_dynamic_scenarios, quality_report, scenario_mask, scenario_performance
 from suite.v11_operations import case_pdf, sla_notifications
@@ -253,8 +253,8 @@ if now_ts-st.session_state.get("last_activity",now_ts)>security_cfg["idle_timeou
 st.session_state.last_activity=now_ts
 admin=user["role"]=="Yonetici"; editable=user["role"] in ["Yonetici","Inceleyen","Onaylayan"]; rules=get_rules();custom_df=list_custom_rules(active_only=True);custom_records=custom_df.to_dict("records");process_override_df=get_process_rule_overrides()
 organization=get_organization_settings();st.markdown(f"<style>:root{{--blue:{organization['accent_color']}}}</style>",unsafe_allow_html=True)
-names=["Operasyon merkezi","Risk panosu","İşlem listesi","Vaka detayı","Süreç merkezi","Veri setleri","Veri kalitesi","Yönetici raporu","Adaptif kontrol","Vaka asistanı","Güvenlik merkezi"]+(["Entegrasyon merkezi","API yönetimi","Senaryo stüdyosu","Kural yönetimi","Sistem yönetimi"] if admin else [])
-nav_icons={"Operasyon merkezi":"🏠","Risk panosu":"📊","İşlem listesi":"📋","Vaka detayı":"🔎","Süreç merkezi":"🧩","Veri setleri":"🗄️","Veri kalitesi":"✅","Yönetici raporu":"📈","Adaptif kontrol":"🧠","Vaka asistanı":"✨","Güvenlik merkezi":"🔐","Entegrasyon merkezi":"🔌","API yönetimi":"🔑","Senaryo stüdyosu":"🧪","Kural yönetimi":"⚙️","Sistem yönetimi":"🏢"}
+names=["Operasyon merkezi","Anlık tarama","Risk panosu","İşlem listesi","Vaka detayı","Süreç merkezi","Veri setleri","Veri kalitesi","Yönetici raporu","Adaptif kontrol","Vaka asistanı","Güvenlik merkezi"]+(["Entegrasyon merkezi","API yönetimi","Senaryo stüdyosu","Kural yönetimi","Sistem yönetimi"] if admin else [])
+nav_icons={"Anlık tarama":"🔍","Operasyon merkezi":"🏠","Risk panosu":"📊","İşlem listesi":"📋","Vaka detayı":"🔎","Süreç merkezi":"🧩","Veri setleri":"🗄️","Veri kalitesi":"✅","Yönetici raporu":"📈","Adaptif kontrol":"🧠","Vaka asistanı":"✨","Güvenlik merkezi":"🔐","Entegrasyon merkezi":"🔌","API yönetimi":"🔑","Senaryo stüdyosu":"🧪","Kural yönetimi":"⚙️","Sistem yönetimi":"🏢"}
 if st.session_state.get("main_navigation") not in names:st.session_state.main_navigation=names[0]
 process_options=["Para Transferleri"]+list(PROCESS_DEFINITIONS)
 if st.session_state.get("active_process") not in process_options:st.session_state.active_process=process_options[0]
@@ -395,6 +395,46 @@ def case_table(frame, display, key, origin, height, sequence=None):
 def return_to_origin(origin):
     st.session_state.main_navigation = origin
 
+if page=="Anlık tarama":
+    st.subheader("Anlık tarama")
+    scope = f"{page}_{user['username']}_{tenant_id}_{active_process}"
+    text_key = f"scan_text_{scope}"
+    example = ("65 yaş ve üzerindeki ve en az 365 gündür hareketsiz olan hesapları göster" if active_process == "Para Transferleri"
+               else "Risk Skoru en az 70 olan kayıtları göster")
+    if text_key not in st.session_state:
+        st.session_state[text_key] = st.session_state.get(f"scan_draft_{scope}", "")
+    query = st.text_area("Neyi kontrol etmek istiyorsun?", placeholder=example, key=text_key, height=100, max_chars=2000)
+    st.session_state[f"scan_draft_{scope}"] = query
+    scope_signature = (query, source, upload_hash, persistent_dataset_id)
+    result_key = f"scan_result_{scope}"
+    if source_pending:
+        st.info("Taramak için bir dosya veya veri seti seç.")
+    if st.button("Verileri tara", type="primary", disabled=source_pending or not query.strip()):
+        st.session_state.pop(result_key,None)
+        try:
+            terms, logic = instant_filter(query, active_df, active_process)
+            st.session_state[result_key] = (scope_signature, terms, logic)
+        except ValueError as error:
+            st.error(str(error))
+        except Exception:
+            st.error("Soru şu anda yorumlanamadı. Yeniden deneyebilir veya alan adıyla birlikte bir eşik yazabilirsin.")
+    result = st.session_state.get(result_key)
+    if not source_pending and result and result[0] == scope_signature:
+        _, terms, logic = result
+        mask = scenario_mask(active_df, terms, logic)
+        hits = active_df.loc[mask].sort_values("risk_score", ascending=False, kind="stable")
+        st.subheader("Tarama sonucu")
+        st.write(f"{source_label} · {len(active_df):,} kayıt tarandı, {len(hits):,} kayıt eşleşti.".replace(",", "."))
+        st.caption((" " + logic + " ").join(f"{field_label(t['field'])} {t['operator']} {t['value']}" for t in terms))
+        if len(hits):
+            fields = list(dict.fromkeys([active_id, active_date, *[t["field"] for t in terms], "risk_score"]))
+            display = rename_for_display(hits[fields])
+            case_table(hits, display, f"scan_hits_{scope}", page, 380)
+            st.download_button("Eşleşen kayıtları indir",display.to_csv(index=False).encode("utf-8-sig"),"senaryo_eslesmeleri.csv","text/csv")
+        else:
+            st.info("Bu koşulları karşılayan kayıt bulunamadı.")
+    with st.expander("Kullanılabilecek alanlar"):
+        st.dataframe(pd.DataFrame([{"Alan":field_label(f),"Teknik adı":f} for f in active_df.columns]),hide_index=True)
 if page=="Operasyon merkezi":
     st.subheader(f"{organization['organization_name']} · Operasyon Merkezi")
     st.caption(f"{tr_text(active_process)} sürecinin güncel kontrol görünümü")
