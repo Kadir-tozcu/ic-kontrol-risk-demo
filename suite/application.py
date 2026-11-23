@@ -1064,12 +1064,27 @@ if admin:
                     st.error(f"Dosya yüklenemedi. {error}")
         picker_key = f"studio_picker_{active_process}"
         new_key = st.session_state.pop("studio_selection", None)
+        latest = scenario_rows.drop_duplicates("scenario_key").set_index("scenario_key")
         if new_key in scenario_keys:
             st.session_state[picker_key] = new_key
-        selected_key=st.selectbox("Çalışılacak senaryo",["Yeni senaryo"]+scenario_keys,key=picker_key,format_func=lambda x:x if x=="Yeni senaryo" else scenario_rows[scenario_rows.scenario_key==x].iloc[0]["name"])
-        current=None
-        if selected_key!="Yeni senaryo":
-            versions=scenario_rows[scenario_rows.scenario_key==selected_key];version_id=st.selectbox("Sürüm",versions.id.tolist(),key=f"studio_version_{selected_key}",format_func=lambda i:f"v{int(versions[versions.id==i].iloc[0].version)} · {versions[versions.id==i].iloc[0].status}");current=versions[versions.id==version_id].iloc[0]
+            st.session_state[f"studio_version_{new_key}"] = int(latest.loc[new_key,"id"])
+        def scenario_label(key):
+            if key == "Yeni senaryo":
+                return key
+            row = latest.loc[key]
+            return f"{row['name']} · v{row.version} · {key[:8]}"
+        selected_key = st.selectbox("Çalışılacak senaryo", ["Yeni senaryo", *scenario_keys],
+                                    key=picker_key, format_func=scenario_label,
+                                    help="Listede senaryo adı veya kısa kodunu yazarak arayabilirsiniz.")
+        current = None
+        if selected_key != "Yeni senaryo":
+            versions = scenario_rows[scenario_rows.scenario_key == selected_key].set_index("id", drop=False)
+            def version_label(i):
+                row = versions.loc[i]
+                status = "Etkin" if row.active else "Taslak" if row.status == "TASLAK" else "Geçmiş sürüm"
+                return f"v{row.version} · {status} · {row.created_at}"
+            version_id = st.selectbox("Sürüm", versions.index.tolist(), key=f"studio_version_{selected_key}", format_func=version_label)
+            current = versions.loc[version_id]
         templates = {
             "Para Transferleri": {
                 "Hareketsiz hesaptan yüksek tutarlı transfer": (
@@ -1101,16 +1116,20 @@ if admin:
                 existing = [dict(field=field, operator=op, value=value) for field, op, value in terms]
         available_fields = list(dict.fromkeys(list(required_fields) + list(optional_fields) + [c["field"] for c in existing]))
         editor_key = f"{active_process}_{selected_key}_{defaults.get('id', template)}"
-        condition_count = st.number_input("Koşul sayısı", min_value=1, max_value=max(20,len(existing)), value=max(1,len(existing)), key=f"condition_count_{editor_key}")
+        # Keep stable row identities while adding, copying or removing a condition.
+        if st.session_state.get("studio_layout_owner") != editor_key or f"name_{editor_key}" not in st.session_state:
+            st.session_state.studio_layout_owner = editor_key
+            st.session_state.studio_rows = {uuid4().hex: item for item in (existing or [{}])}
+        rows = st.session_state.studio_rows
+        row_limit = max(20, len(existing))
         with st.container(border=True):
             name = st.text_input("Senaryo adı", defaults.get("name", ""), key=f"name_{editor_key}")
             description = st.text_area("Açıklama", defaults.get("description", ""), height=70, key=f"desc_{editor_key}")
             logic = st.radio("Koşulların bağlantısı", ["VE","VEYA"], horizontal=True, index=int(defaults.get("logic") == "VEYA"), key=f"logic_{editor_key}")
             conditions = []
             issues = []
-            for idx in range(condition_count):
-                old = existing[idx] if idx < len(existing) else {}
-                suffix = f"{editor_key}_{idx}"
+            for idx, (row_key, old) in enumerate(rows.items()):
+                suffix = f"{editor_key}_{row_key}"
                 enabled = st.checkbox(f"{idx+1}. koşulu kullan", value=True, key=f"cond_enabled_{suffix}")
                 cols = st.columns([1.5,1.3,1.2])
                 field = cols[0].selectbox(f"{idx+1}. alan", available_fields, format_func=field_label, index=available_fields.index(old.get("field",available_fields[0])), key=f"cond_field_{suffix}")
@@ -1118,6 +1137,13 @@ if admin:
                 op = OPERATORS[operator]
                 needs_value = op not in ("empty", "not_empty")
                 value = cols[2].text_input(f"{idx+1}. değer", str(old.get("value","")), disabled=not needs_value or not enabled, help="Sayısal eşiklerde binlik ayırıcı kullanmayın. Örnek: 250000 veya 0,60." if op in (">",">=","<","<=") else None, key=f"cond_value_{suffix}").strip()
+                controls = st.columns(2)
+                if controls[0].button("Koşulu çoğalt", key=f"copy_{suffix}", disabled=len(rows) >= row_limit):
+                    rows[uuid4().hex] = dict(field=field, operator=op, value=value)
+                    st.rerun()
+                if controls[1].button("Koşulu kaldır", key=f"remove_{suffix}", disabled=len(rows) == 1):
+                    del rows[row_key]
+                    st.rerun()
                 if not enabled:
                     continue
                 if needs_value and not value:
@@ -1128,9 +1154,30 @@ if admin:
                     if not isfinite(pd.to_numeric(value, errors="coerce")):
                         issues.append(f"{idx+1}. koşula binlik ayırıcı kullanmadan sayı girin (ör. 250000 veya 0,60).")
                 conditions.append(dict(field=field, operator=op, value=value if needs_value else ""))
+            if st.button("＋ Koşul ekle", key=f"add_{editor_key}", disabled=len(rows) >= row_limit):
+                rows[uuid4().hex] = {}
+                st.rerun()
             points = st.slider("Risk puanı",1,100,int(defaults.get("points",20)),key=f"points_{editor_key}")
             reason = st.text_input("Risk gerekçesi", defaults.get("reason",""),key=f"reason_{editor_key}")
             action = st.text_area("Önerilen kontrol aksiyonu",defaults.get("action",""),height=80,key=f"action_{editor_key}")
+            operator_text = {v:k.lower() for k,v in OPERATORS.items()}
+            def describe(terms):
+                return [f"{field_label(term['field'])} · {operator_text.get(term['operator'],term['operator'])} {term.get('value','')}".strip() for term in terms]
+            st.markdown("#### Kural özeti")
+            st.text((" " + logic + " ").join(describe(conditions)) or "Etkin koşul yok")
+            st.caption(f"Eşleşen kayda +{points} risk puanı uygulanır.")
+            changed = True
+            if current is not None:
+                baseline = [current["name"],current["description"],current["logic"],str(current["points"]),
+                            current["reason"],current["action"],"\n".join(describe(existing))]
+                edited = [name.strip(),description.strip(),logic,str(points),reason.strip(),action.strip(),"\n".join(describe(conditions))]
+                differences = [{"Alan":label,"Kayıtlı sürüm":before,"Düzenleme":after}
+                               for label,before,after in zip(["Ad","Açıklama","Bağlantı","Puan","Risk gerekçesi","Aksiyon","Koşullar"],baseline,edited)
+                               if before != after]
+                changed = bool(differences)
+                if changed:
+                    st.caption(f"v{current.version} ile karşılaştırma · Kaydedilmemiş değişiklikler")
+                    st.dataframe(pd.DataFrame(differences),hide_index=True,width="stretch")
             threshold_indices = [i for i, term in enumerate(conditions) if term["operator"] in (">", ">=", "<", "<=")]
             compare_index = None
             if threshold_indices and st.checkbox("Alternatif eşikle karşılaştır", key=f"compare_{editor_key}"):
@@ -1139,7 +1186,7 @@ if admin:
                     key=f"compare_field_{editor_key}")
                 alternative = st.text_input("Alternatif eşik", key=f"alternative_{editor_key}_{compare_index}").strip().replace(",", ".")
             test_clicked = st.button("Mevcut veride test et")
-            draft_clicked = st.button("Taslak olarak kaydet")
+            draft_clicked = st.button("Taslak olarak kaydet", disabled=not changed)
 
         if not conditions:
             issues.append("En az bir koşulu etkinleştirin.")
@@ -1258,7 +1305,7 @@ if admin:
             change = "Durdur" if current["active"] else "Etkinleştir"
             st.caption(f"{current['name']} · v{current['version']} · {change}. Formdaki düzenlemeleri kullanmak için önce yeni bir taslak kaydedin.")
             justification = st.text_input("Değişiklik gerekçesi", key=f"justification_{current['id']}")
-            if st.button("Etkiyi test et ve onaya gönder", disabled=not justification.strip() or source_pending):
+            if st.button("Etkiyi test et ve onaya gönder", disabled=changed or not justification.strip() or source_pending):
                 others = published_scenarios[published_scenarios.scenario_key != selected_key]
                 proposed = others if current["active"] else pd.concat([others,current.to_frame().T],ignore_index=True).sort_values("scenario_key")
                 try:
