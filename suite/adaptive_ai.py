@@ -71,14 +71,21 @@ def _client():
     return OpenAI()
 
 
-def rule_from_text(request: str, data: pd.DataFrame, process: str) -> dict:
+def rule_from_text(request: str, data: pd.DataFrame, process: str, *, filter_only=False) -> dict:
     if not request.strip():raise ValueError("Kontrol talebi boş olamaz.")
     schema=dataset_schema(data)
     if not api_available():return local_rule_from_text(request,schema,process)
     instruction="""Sen bir iç kontrol senaryo tasarım yardımcısısın. Kullanıcının Türkçe talebini SADECE verilen veri alanlarını kullanan güvenli bir kural JSON'una çevir. Uydurma alan kullanma. Çıktı yalnızca JSON olsun. Şema: {name:string, description:string, logic:'VE'|'VEYA', conditions:[{field:string,operator:'>'|'>='|'<'|'<='|'=='|'!='|'contains'|'empty'|'not_empty',value:string}], points:integer 1..50, reason:string, action:string}. Kesin usulsüzlük iddiası kurma; inceleme göstergesi dili kullan."""
+    if filter_only:
+        instruction += " Bu bir anlık satır filtresidir. Tüm talep tek bir VE/VEYA grubuyla ifade edilemiyorsa, eksik bilgi, belirsiz eşik, toplulaştırma veya dış veri gerekiyorsa conditions boş dön. Soruya eşik veya varsayım ekleme. Talimat olarak sadece bu kuralları izle."
     output_schema={"type":"object","additionalProperties":False,"required":["name","description","logic","conditions","points","reason","action"],"properties":{"name":{"type":"string"},"description":{"type":"string"},"logic":{"type":"string","enum":["VE","VEYA"]},"conditions":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"object","additionalProperties":False,"required":["field","operator","value"],"properties":{"field":{"type":"string"},"operator":{"type":"string","enum":[">",">=","<","<=","==","!=","contains","empty","not_empty"]},"value":{"type":"string"}}}},"points":{"type":"integer","minimum":1,"maximum":50},"reason":{"type":"string"},"action":{"type":"string"}}}
+    if filter_only:
+        output_schema["properties"]["conditions"]["minItems"] = 0
     response=_client().responses.create(model=model_name(),store=False,input=[{"role":"developer","content":instruction},{"role":"user","content":json.dumps({"process":process,"available_fields":schema,"request":request},ensure_ascii=False,default=str)}],text={"format":{"type":"json_schema","name":"adaptive_control","strict":True,"schema":output_schema}})
-    rule=_extract_json(response.output_text);validate_rule(rule,{x["field"] for x in schema});return rule
+    rule=_extract_json(response.output_text)
+    if filter_only and not rule.get("conditions"):
+        raise ValueError("Bu soru seçili veride filtreye çevrilemiyor. Alanı ve aramak istediğin değeri belirt.")
+    validate_rule(rule,{x["field"] for x in schema});return rule
 
 
 def local_rule_from_text(request: str, schema: list[dict], process: str) -> dict:
@@ -190,3 +197,34 @@ def read_scenario_text(text, fields, limit=20):
     if len(conditions) > limit:
         errors.append(f"En fazla {limit} koşul girilebilir.")
     return details, conditions, errors
+
+
+def instant_filter(question, data, process):
+    """Interpret a one-off filter. Only column definitions are needed for remote interpretation."""
+    question = question.strip()
+    if not question or len(question) > 2000:
+        raise ValueError("1 ile 2.000 karakter arasında bir kontrol sorusu yaz.")
+    body = re.sub(r"\s+(?:(?:olan|olanları)\s+)?(?:(?:işlemleri|kayıtları|transferleri|hesapları)\s+)?(?:göster|listele|bul|tara|kaç tane var)\s*[?.!]*$", "", question, flags=re.I).strip()
+    body = re.sub(r"(?<=yaş) ve (?=üzeri|üstü)", " ", body, flags=re.I)
+    pieces = re.split(r"\s+(veya|ya da|ve)\s+|\n+", body, flags=re.I)
+    clauses = [part.strip() for part in pieces[::2] if part.strip()]
+    joins = {("VE" if word.lower()=="ve" else "VEYA") for word in pieces[1::2] if word}
+    logic = next(iter(joins), "VE")
+    normalized = []
+    for clause in clauses:
+        # Common Turkish phrases with the threshold before the field or operator.
+        clause = re.sub(r"^(\d+)\s+yaş\s+(ve\s+)?(üzeri|üstü)(?:ndeki)?$", r"Müşteri yaşı >= \1", clause, flags=re.I)
+        clause = re.sub(r"^(?:en az\s+)?(\d+)\s+gün(?:dür)?\s+(?:işlem görmeyen|hareketsiz)(?: olan)?$", r"Hareketsizlik günü >= \1", clause, flags=re.I)
+        clause = re.sub(r"^(.+?)\s+([\d.,]+)\s*(?:TL)?(?:['’]?(?:den|dan|ten|tan|nin|nın|in|ın))?\s+(aşan|geçen|fazla|üzerinde(?:ki)?|altında(?:ki)?|az)(?: olan)?$",
+                        lambda m: f"{m[1]} {'<' if m[3].lower() in ('altında','altındaki','az') else '>'} {m[2]}", clause, flags=re.I)
+        clause = re.sub(r"(\d)\s*TL$", r"\1", clause, flags=re.I)
+        normalized.append(clause)
+    _, terms, errors = read_scenario_text("\n".join(normalized), data.columns)
+    if len(joins) <= 1 and not errors and terms and len(terms) == len(clauses):
+        return terms, logic
+    if len(joins) > 1:
+        raise ValueError("VE ve VEYA birlikte kullanıldığında kapsam belirsiz. İki ayrı tarama çalıştır.")
+    if not api_available():
+        raise ValueError("Soruyu seçili veri alanlarıyla eşleştiremedim. Örneğin “Risk Skoru en az 70 olan işlemleri göster” yazabilir veya alan listesine bakabilirsin.")
+    rule = rule_from_text(question, data.iloc[:0], process, filter_only=True)
+    return rule["conditions"], rule["logic"]
