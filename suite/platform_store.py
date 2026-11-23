@@ -170,6 +170,7 @@ def backup_bytes() -> bytes:
         target = sqlite3.connect(path)
         source = connect()
         try:
+            source.commit()  # Finish schema initialization before taking a SQLite snapshot.
             source.backup(target)
             tables = {row[0] for row in target.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             with target:
