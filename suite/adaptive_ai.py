@@ -117,3 +117,76 @@ def ask_dataset(question: str, data: pd.DataFrame, process: str, case_context: d
     instruction="""Sen bir iç kontrol analiz asistanısın. Yalnızca verilen özet ve vaka bağlamını kullan. Görmediğin ham veri hakkında varsayım yapma. Bulguyu kesin usulsüzlük olarak sunma. Kısa, açık Türkçe cevap ver; gerekiyorsa kontrol adımlarını numaralandır. Kişisel veri isteme."""
     response=_client().responses.create(model=model_name(),store=False,input=[{"role":"developer","content":instruction},{"role":"user","content":json.dumps({"question":question,"context":context},ensure_ascii=False,default=str)}])
     return response.output_text
+
+
+def read_scenario_text(text, fields, limit=20):
+    """Parse the studio's line-based notation without sending data to an API."""
+    from difflib import get_close_matches
+    from math import isfinite
+
+    if len(text) > 12000:
+        return {}, [], ["Bir senaryo metni en fazla 12.000 karakter olabilir."]
+    metadata = {"ad":"name", "senaryo adi":"name", "aciklama":"desc", "puan":"points",
+                "risk puani":"points", "gerekce":"reason", "risk gerekcesi":"reason",
+                "aksiyon":"action", "onerilen kontrol aksiyonu":"action", "baglanti":"logic"}
+    operators = {"=":"==", "==":"==", "!=":"!=", ">":">", "<":"<", ">=":">=", "<=":"<=",
+                 "≥":">=", "≤":"<=", "en az":">=", "en fazla":"<=", "icerir":"contains",
+                 "esittir":"==", "esit degil":"!=", "bos":"empty", "bos degil":"not_empty"}
+    expression = re.compile(r"^(.+?)\s*(>=|<=|!=|==|[<>=≥≤]|\s+(?:en az|en fazla|içerir|icerir|eşittir|esittir|eşit değil|esit degil|boş değil|bos degil|boş|bos)\b)\s*(.*?)$", re.I)
+    aliases = {}
+    for field in fields:
+        for alias in (field, field_label(field), *FIELD_SYNONYMS.get(field, [])):
+            aliases.setdefault(_fold(alias), set()).add(field)
+    details, conditions, errors = {}, [], []
+    for line_no, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            label, separator, value = line.partition(":")
+            prop = metadata.get(_fold(label)) if separator else None
+            if prop:
+                value = value.strip()
+                if prop in details or not value:
+                    raise ValueError("Başlık tekrarlanmış veya değeri boş.")
+                if prop == "points":
+                    if not re.fullmatch(r"[0-9]{1,3}", value) or not 1 <= int(value) <= 100:
+                        raise ValueError("Risk puanı 1 ile 100 arasında tam sayı olmalı.")
+                    value = int(value)
+                if prop == "logic":
+                    value = value.upper()
+                    if value not in ("VE","VEYA"):
+                        raise ValueError("Bağlantı için VE veya VEYA yazın.")
+                details[prop] = value
+                continue
+            if len(line) > 500:
+                raise ValueError("Koşul satırı en fazla 500 karakter olabilir.")
+            match = expression.fullmatch(line)
+            if not match:
+                raise ValueError("Alan, karşılaştırma ve değer yazın. Her koşulu ayrı satıra girin.")
+            label, token, value = (part.strip() for part in match.groups())
+            matches = [label] if label in fields else aliases.get(_fold(label), set())
+            if len(matches) != 1:
+                suggestions = get_close_matches(_fold(label), aliases, n=2)
+                choices = sorted({key for alias in suggestions for key in aliases[alias]})
+                raise ValueError("Alan tanınmadı veya birden fazla sütuna uyuyor. Teknik adı kullanın." +
+                                 (" Yakın alanlar: " + ", ".join(choices) if choices else ""))
+            field = next(iter(matches))
+            op = operators[token if token in operators else _fold(token)]
+            if op in ("empty","not_empty"):
+                if value:
+                    raise ValueError("Boşluk kontrolünden sonra değer yazılmaz.")
+            elif not value:
+                raise ValueError("Karşılaştırma değeri eksik.")
+            elif op in (">","<",">=","<="):
+                if not re.fullmatch(r"[+-]?(?:[0-9]+|[0-9]{1,3}(?:\.[0-9]{3})+)(?:,[0-9]+)?",value):
+                    raise ValueError("Sayısal eşiği 250000, 250.000 veya 0,60 biçiminde yazın.")
+                value = value.replace(".","").replace(",",".")
+                if not isfinite(float(value)):
+                    raise ValueError("Sayısal eşik çok büyük.")
+            conditions.append(dict(field=field,operator=op,value=value))
+        except ValueError as error:
+            errors.append(f"{line_no}. satır: {error}")
+    if len(conditions) > limit:
+        errors.append(f"En fazla {limit} koşul girilebilir.")
+    return details, conditions, errors
