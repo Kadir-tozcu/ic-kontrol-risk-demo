@@ -205,7 +205,8 @@ def instant_filter(question, data, process):
     if not question or len(question) > 2000:
         raise ValueError("1 ile 2.000 karakter arasında bir kontrol sorusu yaz.")
     body = re.sub(r"\s+(?:(?:olan|olanları)\s+)?(?:(?:işlemleri|kayıtları|transferleri|hesapları)\s+)?(?:göster|listele|bul|tara|kaç tane var)\s*[?.!]*$", "", question, flags=re.I).strip()
-    body = re.sub(r"(?<=yaş) ve (?=üzeri|üstü)", " ", body, flags=re.I)
+    body = re.sub(r"(\d+)\s+yaş\s+ve\s+(?:üzeri(?:ndeki)?|üstü(?:ndeki)?)", r"Müşteri yaşı >= \1", body, flags=re.I)
+    body = re.sub(r"(?<=\d)\s+yaşında(?:ki)?", " yaşında", body, flags=re.I)
     pieces = re.split(r"\s+(veya|ya da|ve)\s+|\n+", body, flags=re.I)
     clauses = [part.strip() for part in pieces[::2] if part.strip()]
     joins = {("VE" if word.lower()=="ve" else "VEYA") for word in pieces[1::2] if word}
@@ -213,8 +214,13 @@ def instant_filter(question, data, process):
     normalized = []
     for clause in clauses:
         # Common Turkish phrases with the threshold before the field or operator.
-        clause = re.sub(r"^(\d+)\s+yaş\s+(ve\s+)?(üzeri|üstü)(?:ndeki)?$", r"Müşteri yaşı >= \1", clause, flags=re.I)
-        clause = re.sub(r"^(?:en az\s+)?(\d+)\s+gün(?:dür)?\s+(?:işlem görmeyen|hareketsiz)(?: olan)?$", r"Hareketsizlik günü >= \1", clause, flags=re.I)
+        clause = re.sub(r"^(\d+)\s+yaş(?:ın)?\s+(?:üzeri(?:ndeki)?|üstü(?:ndeki)?|üstünde)$", r"Müşteri yaşı > \1", clause, flags=re.I)
+        clause = re.sub(r"^(\d+) yaşında$", r"Müşteri yaşı = \1", clause, flags=re.I)
+        clause = re.sub(r"^(?:en az\s+)?(\d+)\s+(gün(?:dür)?|yıl(?:dır)?)\s+(?:işlem görmeyen|hareketsiz)(?: olan)?$",
+                        lambda m: f"Hareketsizlik günü >= {int(m[1]) * (365 if m[2].lower().startswith('yıl') else 1)}", clause, flags=re.I)
+        risk = re.fullmatch(r"(yüksek|orta|düşük)\s+riskli(?: olan)?", clause, flags=re.I)
+        if risk:
+            clause = "risk_level = " + {"yuksek":"YUKSEK","orta":"ORTA","dusuk":"DUSUK"}[_fold(risk[1])]
         clause = re.sub(r"^(.+?)\s+([\d.,]+)\s*(?:TL)?(?:['’]?(?:den|dan|ten|tan|nin|nın|in|ın))?\s+(aşan|geçen|fazla|üzerinde(?:ki)?|altında(?:ki)?|az)(?: olan)?$",
                         lambda m: f"{m[1]} {'<' if m[3].lower() in ('altında','altındaki','az') else '>'} {m[2]}", clause, flags=re.I)
         clause = re.sub(r"(\d)\s*TL$", r"\1", clause, flags=re.I)
