@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import time
+from functools import partial
 from uuid import uuid4
 from html import escape
 from datetime import datetime
@@ -261,8 +262,11 @@ if st.session_state.get("active_process") not in process_options:st.session_stat
 active_process=st.session_state.active_process
 def process_overrides(process_name):
     return process_override_df[process_override_df.process==process_name].to_dict("records") if len(process_override_df) else []
-def activate_list_upload(process_name):
-    if st.session_state.get(f"list_scan_upload_{process_name}") is not None:st.session_state[f"source_{process_name}"]="Kendi CSV / Excel dosyam"
+def activate_upload(process_name, widget_key):
+    selected = st.session_state.get(widget_key)
+    st.session_state[f"current_upload_{tenant_id}_{user['username']}_{process_name}"] = selected
+    if selected is not None:
+        st.session_state[f"source_{process_name}"] = "Kendi CSV / Excel dosyam"
 st.markdown('<div class="hero"><div class="hero-kicker">Açıklanabilir risk teknolojisi</div><h1>İç Kontrol Risk Ajansı</h1><p>İşlemleri, süreçleri ve kontrol vakalarını tek merkezden yönetin.</p><div class="hero-badge">● Sistem aktif · Yerel ve denetlenebilir analiz</div></div>',unsafe_allow_html=True)
 with st.sidebar:
     st.caption("Özel demo oturumu · Yalnızca sentetik veri kullanın. Oturum sona erdiğinde bu çalışma alanı silinir.")
@@ -276,18 +280,19 @@ with st.sidebar:
     required_fields=REQUIRED_COLUMNS if active_process=="Para Transferleri" else PROCESS_DEFINITIONS[active_process]["fields"];optional_fields=list(dict.fromkeys((OPTIONAL_COLUMNS if active_process=="Para Transferleri" else [])+expanded_optional_fields(active_process)))
     template_name=tr_text(active_process).replace("/","-").replace(" ","_")+"_veri_sablonu.xlsx"
     st.download_button("📥 Türkçe Excel şablonunu indir",process_template_excel(active_process,tuple(required_fields),tuple(optional_fields)),template_name,mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",width="stretch")
-    source=st.radio("Veri kaynağı",["Sentetik demo","Kendi CSV / Excel dosyam","Kalıcı veri seti"],key=f"source_{active_process}");uploaded=None;persistent_dataset_id=None;list_uploaded=st.session_state.get(f"list_scan_upload_{active_process}")
+    source=st.radio("Veri kaynağı",["Sentetik demo","Kendi CSV / Excel dosyam","Kalıcı veri seti"],key=f"source_{active_process}");uploaded=None;persistent_dataset_id=None
     with st.expander(f"Zorunlu alanlar · {len(required_fields)}"):st.dataframe(pd.DataFrame({"Türkçe sütun adı":turkish_columns(required_fields)}),hide_index=True,width="stretch")
     if optional_fields:
         with st.expander(f"İsteğe bağlı alanlar · {len(optional_fields)}"):st.dataframe(pd.DataFrame({"Türkçe sütun adı":turkish_columns(optional_fields)}),hide_index=True,width="stretch")
     if source.startswith("Kendi"):
-        sidebar_uploaded=st.file_uploader(f"{tr_text(active_process)} dosyasını seçin",type=["csv","xlsx"],key=f"upload_{active_process}");uploaded=sidebar_uploaded or list_uploaded
+        st.file_uploader(f"{tr_text(active_process)} dosyasını seçin",type=["csv","xlsx"],key=f"upload_{active_process}",on_change=activate_upload,args=(active_process,f"upload_{active_process}"))
+        uploaded=st.session_state.get(f"current_upload_{tenant_id}_{user['username']}_{active_process}")
+        if uploaded is not None:
+            st.caption(f"Analizde kullanılan dosya: {uploaded.name}")
     elif source=="Kalıcı veri seti":
         persistent_options=list_datasets(active_process)
         if persistent_options.empty:st.info("Bu süreçte henüz kalıcı veri seti yok. Veri Setleri ekranından oluşturabilirsiniz.")
         else:persistent_dataset_id=st.selectbox("Veri seti",persistent_options.id.tolist(),format_func=lambda x:f"{persistent_options[persistent_options.id==x].iloc[0]['name']} · {persistent_options[persistent_options.id==x].iloc[0]['period']} · {int(persistent_options[persistent_options.id==x].iloc[0]['record_count'])} kayıt",key=f"persistent_{active_process}")
-    if list_uploaded is not None:
-        source="Kendi CSV / Excel dosyam";uploaded=list_uploaded;persistent_dataset_id=None
 try:
     transfer_demo=demo(json.dumps(rules,sort_keys=True),json.dumps(custom_records,sort_keys=True,default=str))
     quality_issues=pd.DataFrame();quality_summary={"rows":0,"columns":0,"errors":0,"warnings":0,"missing":0};raw_input=None;mapping_preview=pd.DataFrame();upload_hash=None;analysis_authorized=False;source_pending=(source.startswith("Kendi") and uploaded is None) or (source=="Kalıcı veri seti" and persistent_dataset_id is None)
@@ -403,13 +408,15 @@ if page=="Anlık tarama":
                else "Risk Skoru en az 70 olan kayıtları göster")
     if text_key not in st.session_state:
         st.session_state[text_key] = st.session_state.get(f"scan_draft_{scope}", "")
-    query = st.text_area("Neyi kontrol etmek istiyorsun?", placeholder=example, key=text_key, height=100, max_chars=2000)
+    with st.form(f"instant_form_{scope}"):
+        query = st.text_area("Neyi kontrol etmek istiyorsun?", placeholder=example, key=text_key, height=100, max_chars=2000)
+        scan_clicked = st.form_submit_button("Verileri tara", type="primary", disabled=source_pending)
     st.session_state[f"scan_draft_{scope}"] = query
     scope_signature = (query, source, upload_hash, persistent_dataset_id)
     result_key = f"scan_result_{scope}"
     if source_pending:
         st.info("Taramak için bir dosya veya veri seti seç.")
-    if st.button("Verileri tara", type="primary", disabled=source_pending or not query.strip()):
+    if scan_clicked:
         st.session_state.pop(result_key,None)
         try:
             terms, logic = instant_filter(query, active_df, active_process)
@@ -515,7 +522,7 @@ if page=="İşlem listesi":
     with st.expander("🧭 Analiz Çalıştırma Merkezi", expanded=st.session_state.get(queue_key, all_records) == all_records):
         st.caption("Dosyanızı yükleyin, veri kalitesini ve eşleştirmeleri kontrol edin, çalışacak senaryoları seçin ve analizi başlatın.")
         up_left,up_right=st.columns([2.2,1])
-        with up_left:list_scan_file=st.file_uploader(f"{tr_text(active_process)} verisini yükleyin",type=["csv","xlsx"],key=f"list_scan_upload_{active_process}",help="Türkçe veya kuruma özel sütun adlarını kullanabilirsiniz.",on_change=activate_list_upload,args=(active_process,))
+        with up_left:st.file_uploader(f"{tr_text(active_process)} verisini yükleyin",type=["csv","xlsx"],key=f"list_scan_upload_{active_process}",help="Türkçe veya kuruma özel sütun adlarını kullanabilirsiniz.",on_change=activate_upload,args=(active_process,f"list_scan_upload_{active_process}"))
         with up_right:st.download_button("Boş veri şablonunu indir",process_template_excel(active_process,tuple(required_fields),tuple(optional_fields)),template_name,mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",width="stretch",key=f"list_template_{active_process}")
         if raw_input is not None and upload_hash:
             qc=st.columns(4);qc[0].metric("Dosya satırı",quality_summary["rows"]);qc[1].metric("Sütun",quality_summary["columns"]);qc[2].metric("Veri hatası",quality_summary["errors"]);qc[3].metric("Uyarı",quality_summary["warnings"])
@@ -610,7 +617,7 @@ if page=="İşlem listesi":
                     st.caption(f"{RISK_LABELS.get(record.risk_level, record.risk_level)} risk · {record.risk_score}/100 · {tr_text(record.case_status)}")
                     st.button("Vakayı aç", key=f"mobile_open_{active_process}_{record_id}", width="stretch",
                               on_click=show_case, args=(record_id, "İşlem listesi", sequence))
-    st.download_button("Düzenlenmiş Excel indir",styled_result_excel(filtered,active_process),f"{tr_text(active_process).replace('/','-').replace(' ','_')}_risk_analizi.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",width="stretch")
+    st.download_button("Düzenlenmiş Excel indir",partial(styled_result_excel,filtered,active_process),f"{tr_text(active_process).replace('/','-').replace(' ','_')}_risk_analizi.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",width="stretch")
     reason_summary=active_df.risk_reasons.str.split(r" \| ").explode().map(tr_text).value_counts().rename("Tetiklenme").rename_axis("Risk senaryosu").reset_index()
     with st.expander(f"📊 Senaryo tarama özeti · {len(reason_summary)} gösterge",expanded=False):st.dataframe(reason_summary,hide_index=True,width="stretch")
     run_history=list_analysis_runs(active_process)
@@ -852,7 +859,7 @@ if page=="Yönetici raporu":
     for col,(label,value) in zip(st.columns(4),[("İşleme alınan",len(process_cases)),("Risk doğrulandı",confirmed),("Yanlış alarm",false),("Kararlarda yanlış alarm",f"%{false/(confirmed+false)*100:.1f}" if confirmed+false else "Karar yok")]):col.metric(label,value)
     if len(process_cases):st.subheader("İnceleyen bazında iş yükü");st.bar_chart(process_cases.analyst.replace("","Atanmamış").value_counts(),horizontal=True)
     age_hours=(pd.Timestamp.now()-pd.to_datetime(active_df[active_date])).dt.total_seconds()/3600;sla=active_df.risk_level.map({"YUKSEK":rules["high_sla_hours"],"ORTA":rules["medium_sla_hours"]}).fillna(999999);st.metric("SLA aşımı",int(((age_hours>sla)&~active_df.case_status.isin(["Kapatildi","Yanlis alarm"])).sum()))
-    st.download_button("Yönetici Excel raporu",styled_result_excel(active_df,active_process),"yonetici_risk_raporu.xlsx",width="stretch")
+    st.download_button("Yönetici Excel raporu",partial(styled_result_excel,active_df,active_process),"yonetici_risk_raporu.xlsx",width="stretch")
 if page=="Adaptif kontrol":
     st.subheader("🧠 Adaptif Kontrol ve Veri Asistanı")
     st.caption(f"Aktif süreç: {tr_text(active_process)} · Sistem yalnızca yüklenen veride gerçekten bulunan alanları kullanır.")
@@ -890,7 +897,7 @@ if page=="Adaptif kontrol":
         try:
             adaptive_mask=run_rule(active_df,adaptive_rule);matched=active_df.loc[adaptive_mask].copy();am=st.columns(3);am[0].metric("Taranan kayıt",len(active_df));am[1].metric("Eşleşen kayıt",len(matched));am[2].metric("Eşleşme oranı",f"%{(len(matched)/max(len(active_df),1)*100):.1f}")
             st.dataframe(rename_for_display(matched.head(200)),hide_index=True,width="stretch",height=330)
-            st.download_button("Eşleşen kayıtları Excel olarak indir",styled_result_excel(matched,active_process),f"adaptif_kontrol_{active_process.replace('/','-')}.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",width="stretch")
+            st.download_button("Eşleşen kayıtları Excel olarak indir",partial(styled_result_excel,matched,active_process),f"adaptif_kontrol_{active_process.replace('/','-')}.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",width="stretch")
             if editable:
                 save_col,publish_col=st.columns(2)
                 if save_col.button("Taslak senaryo olarak kaydet",width="stretch",key=f"save_adaptive_{active_process}"):
@@ -938,7 +945,7 @@ if page=="Süreç merkezi":
     if pq:process_filtered=process_filtered[process_filtered[active_id].astype(str).str.contains(pq,case=False)|process_filtered.customer_id.astype(str).str.contains(pq,case=False)]
     process_display=process_filtered.copy();process_display["risk_level"]=process_display["risk_level"].map(RISK_LABELS);process_display["risk_reasons"]=process_display["risk_reasons"].map(tr_text);process_display["recommended_actions"]=process_display["recommended_actions"].map(tr_text);process_display=rename_for_display(localize_values(process_display))
     st.dataframe(process_display,hide_index=True,width="stretch",height=360)
-    st.download_button("Süreç sonucunu düzenlenmiş Excel olarak indir",styled_result_excel(process_filtered,process),f"{tr_text(process).replace('/','-').replace(' ','_')}_risk_sonucu.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",width="stretch")
+    st.download_button("Süreç sonucunu düzenlenmiş Excel olarak indir",partial(styled_result_excel,process_filtered,process),f"{tr_text(process).replace('/','-').replace(' ','_')}_risk_sonucu.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",width="stretch")
     process_candidates=process_scored.sort_values("risk_score",ascending=False);prid=st.selectbox("Vaka detayı",process_candidates[active_id].astype(str),key=f"process_case_{process}");prow=process_scored[process_scored[active_id].astype(str)==prid].iloc[0];process_case_id=prid if process=="Para Transferleri" else f"{process}:{prid}";psaved=get_case(process_case_id)
     dl,dr=st.columns(2)
     with dl:
