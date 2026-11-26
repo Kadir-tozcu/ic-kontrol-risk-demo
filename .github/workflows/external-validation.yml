@@ -6,7 +6,6 @@ on:
       - '.github/workflows/external-validation.yml'
       - 'research_external.py'
       - 'research_validation.py'
-      - 'tests/test_live_e2e.py'
 permissions:
   contents: read
 jobs:
@@ -52,3 +51,5 @@ jobs:
           path: |
             e2e-results.json
             streamlit.log
+            public-failure.png
+            local-failure.png
