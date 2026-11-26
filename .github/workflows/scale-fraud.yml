@@ -1,0 +1,43 @@
+name: Scale and labelled fraud benchmark
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/scale-fraud.yml'
+      - 'research_spark.py'
+      - 'research_fraud.py'
+permissions:
+  contents: read
+jobs:
+  spark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: pip install pandas==2.2.3 pyspark==3.5.5
+      - run: python research_spark.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spark-benchmark
+          path: spark_*
+  fraud:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas==2.2.3 scikit-learn==1.6.1
+      - run: python research_fraud.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fraud-benchmark
+          path: fraud_results.json
