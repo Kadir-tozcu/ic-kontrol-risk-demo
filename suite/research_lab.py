@@ -64,6 +64,9 @@ def benchmark(n, sample_pct, repeats, use_ai):
 
 def render():
     st.subheader("Research Lab | Akademik araştırma")
+    from suite.research_sources import render_sources
+    with st.expander("Açık veri kaynakları", expanded=True):
+        render_sources()
     st.info("Sentetik veride etiketler referans koşullardan üretilir. B modeli ideal referanstır; C modelinin görevi doğal dili doğru kurala çevirmektir. Bu deney gerçek suistimal tespiti değildir.")
     n=st.selectbox("İşlem sayısı",[10000,100000,1000000],index=1,key="lab_n")
     sample=st.slider("Örneklem oranı (%)",1,20,5,key="lab_sample")
