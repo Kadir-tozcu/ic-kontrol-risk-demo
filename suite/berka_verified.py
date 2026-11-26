@@ -25,6 +25,8 @@ def render_verified():
     st.markdown("[Deney kaydı]("+DATA["source"]+") · [Sonuç arşivi]("+DATA["artifact"]+")")
     st.download_button("Doğrulanmış karşılaştırma CSV",d.to_csv(index=False).encode("utf-8-sig"),"berka_verified.csv","text/csv")
     render_external()
+    from suite.controls_verified import render
+    render()
 
 EXTERNAL=json.loads("{\"source\":\"https://github.com/Kadir-tozcu/ic-kontrol-risk-demo/actions/runs/45792740530\",\"artifact\":\"https://github.com/Kadir-tozcu/ic-kontrol-risk-demo/actions/runs/45792740530/artifacts/15103860840\",\"methods\":[{\"method\":\"Örnekleme\",\"tp\":11,\"fp\":15,\"fn\":289,\"tn\":685},{\"method\":\"Tek kural\",\"tp\":191,\"fp\":359,\"fn\":109,\"tn\":341},{\"method\":\"Algoritmik\",\"tp\":203,\"fp\":257,\"fn\":97,\"tn\":443},{\"method\":\"Geri bildirimli YZ\",\"tp\":110,\"fp\":148,\"fn\":190,\"tn\":552}]}")
 def render_external():
