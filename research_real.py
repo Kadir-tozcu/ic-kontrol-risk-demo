@@ -12,10 +12,19 @@ def main():
     x=x.apply(pd.to_numeric)
     assert len(x)==284807 and int(y.sum())==492
     # Chronological split, stable sorting. Holdout labels never enter prompt.
-    order=np.argsort(x["time"].to_numpy(),kind="stable")
+    # OpenML may omit the time feature; use a reproducible stratified holdout in that case.
+    split_method="chronological"
+    if "time" in x.columns:
+        order=np.argsort(x["time"].to_numpy(),kind="stable")
+    else:
+        from sklearn.model_selection import train_test_split
+        a,b=train_test_split(np.arange(len(x)),test_size=len(x)-len(x)//2,random_state=42,stratify=y)
+        order=np.concatenate([a,b]); split_method="stratified_random"
+    print("Split method:",split_method,"Features:",list(x.columns))
     x=x.iloc[order].reset_index(drop=True);y=y.iloc[order].reset_index(drop=True)
     cut=len(x)//2; train=x.iloc[:cut]; tr=y.iloc[:cut]; test=x.iloc[cut:]; truth=y.iloc[cut:].to_numpy()==1
     fields=[c for c in x if c.startswith("v") or c=="amount"]
+    if not fields: raise ValueError("No recognized predictors: "+str(list(x.columns)))
     # All models use same calibration data. Fixed univariate anomaly rule vs LLM selection of up to three predicates.
     options=[]
     for field in fields:
@@ -51,7 +60,7 @@ def main():
             tp=int((pred&truth).sum());fp=int((pred&~truth).sum());fn=int((~pred&truth).sum());tn=int((~pred&~truth).sum())
             rows.append(dict(method=method,seed=seed,n=len(test),coverage=float(inspected.mean()),tp=tp,fp=fp,fn=fn,tn=tn,precision=tp/(tp+fp) if tp+fp else 0,recall=tp/(tp+fn),f1=2*tp/(2*tp+fp+fn),scan_seconds=seconds))
     result=pd.DataFrame(rows);result.to_csv("real_results.csv",index=False)
-    meta=dict(dataset="OpenML 1597 ULB creditcard",rows=len(x),calibration=cut,calibration_positive=int(tr.sum()),evaluation=len(test),evaluation_positive=int(truth.sum()),model=response.model,llm_setup_seconds=setup,fixed=best,llm=[options[i] for i in ids],logic=logic,license=data.details.get("licence"),note="Fraud triage pilot, not internal audit violations. One LLM call; repeated scans not independent model generations.")
+    meta=dict(split_method=split_method,dataset="OpenML 1597 ULB creditcard",rows=len(x),calibration=cut,calibration_positive=int(tr.sum()),evaluation=len(test),evaluation_positive=int(truth.sum()),model=response.model,llm_setup_seconds=setup,fixed=best,llm=[options[i] for i in ids],logic=logic,license=data.details.get("licence"),note="Fraud triage pilot, not internal audit violations. One LLM call; repeated scans not independent model generations.")
     with open("real_protocol.json","w") as f:json.dump(meta,f,indent=2)
     print(json.dumps(meta));print(result.groupby("method")[["coverage","precision","recall","f1","scan_seconds"]].mean().to_string())
 
