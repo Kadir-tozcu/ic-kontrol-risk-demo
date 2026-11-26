@@ -1,0 +1,54 @@
+name: External credit validation and application checks
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/external-validation.yml'
+      - 'research_external.py'
+      - 'research_validation.py'
+      - 'tests/test_live_e2e.py'
+permissions:
+  contents: read
+jobs:
+  external:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas==2.2.3 numpy==2.2.6 openai==2.8.1 scikit-learn==1.6.1
+      - run: python research_external.py
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: external-credit-results
+          path: german_validation*.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: external-credit-protocol
+          path: german_validation_protocol.json
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt playwright
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m unittest discover -s tests -p 'test_research.py'
+      - run: |
+          streamlit run app.py --server.headless true --server.port 8501 > streamlit.log 2>&1 &
+          for i in $(seq 1 45); do curl -fsS http://127.0.0.1:8501/_stcore/health && break; sleep 2; done
+          python tests/test_live_e2e.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-test-evidence
+          path: |
+            e2e-results.json
+            streamlit.log
