@@ -59,6 +59,8 @@ def main():
     d=pd.DataFrame(records)
     # A/B are completed loans; C/D are ongoing, excluded from final repayment endpoint.
     d=d[d.status.isin(["A","B"])].sort_values("date").reset_index(drop=True)
+    from research_validation import validate
+    validate(d, indicators, hashes)
     y=d.status.eq("B").to_numpy(); cut=len(d)//2
     train=d.iloc[:cut];test=d.iloc[cut:];yt=y[:cut];truth=y[cut:]
     if min(int(yt.sum()),int(truth.sum()))==0:raise ValueError("No positive loans in one split")
