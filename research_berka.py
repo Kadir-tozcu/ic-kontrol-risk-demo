@@ -72,10 +72,18 @@ def main():
     best=max(options,key=lambda o:2*o["tp"]/(int(yt.sum())+o["tp"]+o["fp"]))
     def mask(o):
         return (test[o["field"]]<=o["threshold"] if o["op"]=="<=" else test[o["field"]]>=o["threshold"]).to_numpy()
+    # Additional transparent baseline: choose best pair of predicates on calibration only.
+    from itertools import combinations
+    def train_mask(o):
+        return (train[o["field"]]<=o["threshold"] if o["op"]=="<=" else train[o["field"]]>=o["threshold"]).to_numpy()
+    def train_f1(p):
+        return 2*int((p&yt).sum())/(int(yt.sum())+int(p.sum()))
+    pair_candidates=[(train_f1(train_mask(a)|train_mask(b)),a,b,"OR") for a,b in combinations(options,2)]+[(train_f1(train_mask(a)&train_mask(b)),a,b,"AND") for a,b in combinations(options,2)]
+    pair_score,pa,pb,plogic=max(pair_candidates,key=lambda x:x[0])
     rules=None; error=None; setup=None; model=None
     try:
         start=time.perf_counter()
-        resp=OpenAI(timeout=60,max_retries=0).responses.create(model="gpt-4.1-mini",store=False,max_output_tokens=300,input="Choose 1-3 predicate IDs and AND or OR for loan repayment risk triage, maximizing expected F1. Use only calibration aggregates. Output JSON object with ids and logic. Positive count "+str(int(yt.sum()))+" candidates "+json.dumps(options))
+        resp=OpenAI(timeout=60,max_retries=0).responses.create(model="gpt-4.1-mini",store=False,max_output_tokens=500,text={"format":{"type":"json_schema","name":"loan_rule","strict":True,"schema":{"type":"object","properties":{"ids":{"type":"array","items":{"type":"integer","enum":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]}},"logic":{"type":"string","enum":["AND","OR"]}},"required":["ids","logic"],"additionalProperties":False}}},input="Choose 1-3 predicate IDs and AND or OR for loan repayment risk triage, maximizing expected F1. Use only calibration aggregates. Output JSON object with ids and logic. Positive count "+str(int(yt.sum()))+" candidates "+json.dumps(options))
         setup=time.perf_counter()-start;model=resp.model
         p=json.loads(resp.output_text.strip().removeprefix("```json").removesuffix("```").strip())
         ids=p["ids"];logic=p["logic"]
@@ -84,19 +92,20 @@ def main():
     except Exception as e:error=type(e).__name__
     rows=[]
     for seed in range(42,47):
-        for method in (["sample","fixed","llm"] if rules else ["sample","fixed"]):
+        for method in (["sample","fixed","fixed_pair","llm"] if rules else ["sample","fixed","fixed_pair"]):
             t=time.perf_counter();inspected=np.ones(len(test),dtype=bool)
             if method=="sample":
                 inspected[:]=False;inspected[np.random.default_rng(seed).choice(len(test),max(1,len(test)//20),replace=False)]=True
                 pred=np.zeros(len(test),dtype=bool);s=test.loc[inspected,best["field"]]
                 pred[inspected]=(s<=best["threshold"] if best["op"]=="<=" else s>=best["threshold"]).to_numpy()
             elif method=="fixed":pred=mask(best)
+            elif method=="fixed_pair":pred=(mask(pa)|mask(pb)) if plogic=="OR" else (mask(pa)&mask(pb))
             else:pred=(np.logical_and.reduce if rules["logic"]=="AND" else np.logical_or.reduce)([mask(options[i]) for i in rules["ids"]])
             elapsed=time.perf_counter()-t
             tp=int((pred&truth).sum());fp=int((pred&~truth).sum());fn=int((~pred&truth).sum());tn=int((~pred&~truth).sum())
             rows.append(dict(method=method,seed=seed,n=len(test),coverage=float(inspected.mean()),tp=tp,fp=fp,fn=fn,tn=tn,precision=tp/(tp+fp) if tp+fp else None,recall=tp/(tp+fn),f1=2*tp/(2*tp+fp+fn),scan_seconds=elapsed))
     result=pd.DataFrame(rows);result.to_csv("berka_loan_results.csv",index=False)
-    meta=dict(source="https://relational.fel.cvut.cz/dataset/Financial",counts=counts,source_files=base,file_sha256=hashes,indicators=indicators,loan_eligible=len(d),train_n=cut,test_n=len(test),train_positive=int(yt.sum()),test_positive=int(truth.sum()),model=model,llm_error=error,llm_setup_seconds=setup,fixed=best,llm_rules=rules,selected_predicates=[options[i] for i in rules["ids"]] if rules else [],elapsed_seconds=time.perf_counter()-started,note="Completed loan repayment status B is risk proxy, not confirmed audit violation. Transaction indicators unlabelled. No raw data exported.")
+    meta=dict(source="https://relational.fel.cvut.cz/dataset/Financial",counts=counts,source_files=base,file_sha256=hashes,indicators=indicators,loan_eligible=len(d),train_n=cut,test_n=len(test),train_positive=int(yt.sum()),test_positive=int(truth.sum()),model=model,llm_error=error,llm_setup_seconds=setup,fixed=best,fixed_pair={"predicates":[pa,pb],"logic":plogic,"train_f1":pair_score},llm_rules=rules,selected_predicates=[options[i] for i in rules["ids"]] if rules else [],elapsed_seconds=time.perf_counter()-started,note="Completed loan repayment status B is risk proxy, not confirmed audit violation. Transaction indicators unlabelled. No raw data exported.")
     with open("berka_protocol.json","w") as f:json.dump(meta,f,indent=2)
     print("BERKA_PROTOCOL",json.dumps(meta),flush=True)
     print(result.groupby("method")[["coverage","precision","recall","f1","scan_seconds"]].mean().to_string(),flush=True)
