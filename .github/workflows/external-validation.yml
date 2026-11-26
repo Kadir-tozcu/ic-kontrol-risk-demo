@@ -6,6 +6,9 @@ on:
       - '.github/workflows/external-validation.yml'
       - 'research_external.py'
       - 'research_validation.py'
+      - 'tests/test_live_e2e.py'
+      - 'suite/controls_verified.py'
+      - 'suite/berka_verified.py'
 permissions:
   contents: read
 jobs:
