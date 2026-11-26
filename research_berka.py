@@ -4,20 +4,35 @@ Only aggregate outputs are retained. No raw rows or IDs are sent to an LLM.
 import os, json, time
 import numpy as np
 import pandas as pd
-import pymysql
 from openai import OpenAI
 
 def main():
     started=time.perf_counter()
-    db=pymysql.connect(host="relational.fel.cvut.cz",port=3306,user="guest",password="relational",database="financial",connect_timeout=25,read_timeout=180)
-    counts={}
-    with db:
-        with db.cursor() as cur:
-            for table in ("account","client","disp","card","loan","order","trans","district"):
-                cur.execute("SELECT COUNT(*) FROM `"+table+"`")
-                counts[table]=int(cur.fetchone()[0])
-        trans=pd.read_sql("SELECT account_id, date, trans_id, amount, balance, type FROM trans",db)
-        loan=pd.read_sql("SELECT account_id,date,amount,duration,payments,status FROM loan",db)
+    import hashlib
+    import tempfile
+    import urllib.request
+    from pathlib import Path
+    base="https://raw.githubusercontent.com/jlacko/berka-dataset/master/"
+    expected={"account":4500,"client":5369,"disp":5369,"card":892,"loan":682,"order":6471,"trans":1056320,"district":77}
+    counts={}; hashes={}
+    with tempfile.TemporaryDirectory() as temp:
+        for table,n in expected.items():
+            path=Path(temp)/(table+".asc")
+            with urllib.request.urlopen(base+table+".asc",timeout=120) as remote, path.open("wb") as out:
+                import shutil
+                shutil.copyfileobj(remote,out)
+            hashes[table]=hashlib.sha256(path.read_bytes()).hexdigest()
+            if table in ("loan","trans"):
+                frame=pd.read_csv(path,sep=";",encoding="latin1",low_memory=False)
+                frame.columns=frame.columns.str.strip().str.lower()
+                counts[table]=len(frame)
+                if table=="loan":loan=frame[["account_id","date","amount","duration","payments","status"]].copy()
+                else:trans=frame[["account_id","date","trans_id","amount","balance","type","operation"]].copy()
+                del frame
+            else:
+                counts[table]=len(pd.read_csv(path,sep=";",encoding="latin1"))
+            if counts[table]!=n:raise ValueError(f"{table}: expected {n}, got {counts[table]}")
+    print("BERKA_HASHES",json.dumps(hashes),flush=True)
     print("BERKA_COUNTS",json.dumps(counts),flush=True)
     def dates(series):
         s=series.astype(str)
@@ -30,6 +45,7 @@ def main():
     t=time.perf_counter()
     indicators={"negative_balance":int((trans.balance<0).sum()),"gap_at_least_90_days":int((trans.gap_days>=90).sum()),"large_amount_top_1pct":int((trans.amount>=trans.amount.quantile(.99)).sum()),"transaction_rows":len(trans),"transaction_coverage":1.0}
     indicators["scan_seconds"]=time.perf_counter()-t
+    indicators["operation_counts"]={str(k):int(v) for k,v in trans.operation.value_counts(dropna=False).items()}
     print("BERKA_INDICATORS",json.dumps(indicators),flush=True)
     # Loan covariates only from transactions strictly before origination, no post-loan information.
     records=[]
@@ -80,7 +96,7 @@ def main():
             tp=int((pred&truth).sum());fp=int((pred&~truth).sum());fn=int((~pred&truth).sum());tn=int((~pred&~truth).sum())
             rows.append(dict(method=method,seed=seed,n=len(test),coverage=float(inspected.mean()),tp=tp,fp=fp,fn=fn,tn=tn,precision=tp/(tp+fp) if tp+fp else None,recall=tp/(tp+fn),f1=2*tp/(2*tp+fp+fn),scan_seconds=elapsed))
     result=pd.DataFrame(rows);result.to_csv("berka_loan_results.csv",index=False)
-    meta=dict(source="https://relational.fel.cvut.cz/dataset/Financial",counts=counts,indicators=indicators,loan_eligible=len(d),train_n=cut,test_n=len(test),train_positive=int(yt.sum()),test_positive=int(truth.sum()),model=model,llm_error=error,llm_setup_seconds=setup,fixed=best,llm_rules=rules,selected_predicates=[options[i] for i in rules["ids"]] if rules else [],elapsed_seconds=time.perf_counter()-started,note="Completed loan repayment status B is risk proxy, not confirmed audit violation. Transaction indicators unlabelled. No raw data exported.")
+    meta=dict(source="https://relational.fel.cvut.cz/dataset/Financial",counts=counts,source_files=base,file_sha256=hashes,indicators=indicators,loan_eligible=len(d),train_n=cut,test_n=len(test),train_positive=int(yt.sum()),test_positive=int(truth.sum()),model=model,llm_error=error,llm_setup_seconds=setup,fixed=best,llm_rules=rules,selected_predicates=[options[i] for i in rules["ids"]] if rules else [],elapsed_seconds=time.perf_counter()-started,note="Completed loan repayment status B is risk proxy, not confirmed audit violation. Transaction indicators unlabelled. No raw data exported.")
     with open("berka_protocol.json","w") as f:json.dump(meta,f,indent=2)
     print("BERKA_PROTOCOL",json.dumps(meta),flush=True)
     print(result.groupby("method")[["coverage","precision","recall","f1","scan_seconds"]].mean().to_string(),flush=True)
