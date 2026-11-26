@@ -64,6 +64,10 @@ def benchmark(n, sample_pct, repeats, use_ai):
 
 def render():
     st.subheader("Research Lab | Akademik araştırma")
+    from suite.berka_verified import render_verified
+    render_verified()
+    st.divider()
+    st.subheader("Sentetik teknik test (akademik gerçek veri bulgularından ayrı)")
     from suite.research_sources import render_sources
     with st.expander("Açık veri kaynakları", expanded=True):
         render_sources()
