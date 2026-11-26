@@ -1,0 +1,30 @@
+name: Real data research pilot
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/real-research.yml'
+permissions:
+  contents: read
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install numpy==2.2.6 pandas==2.2.3 scikit-learn==1.6.1 openai==2.8.1 pyarrow
+      - name: Run real data pilot
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini
+        run: python research_real.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: real-research-results
+          path: |
+            real_results.csv
+            real_protocol.json
