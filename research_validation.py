@@ -4,8 +4,8 @@ import pandas as pd
 from openai import OpenAI
 from sklearn.model_selection import StratifiedKFold
 
-def validate(d, indicators, hashes):
-    fields=["amount","duration","payments","prior_min_balance","prior_mean_balance","prior_count","payment_to_balance"]
+def validate(d, indicators, hashes, fields=None, prefix="berka", label="Exploratory internal validation"):
+    fields=fields or ["amount","duration","payments","prior_min_balance","prior_mean_balance","prior_count","payment_to_balance"]
     y=d.status.eq("B").to_numpy()
     rows=[]; protocols=[]
     client=OpenAI(timeout=60,max_retries=0)
@@ -52,10 +52,10 @@ def validate(d, indicators, hashes):
         rng=np.random.default_rng(42+fold);ix=rng.choice(len(b),max(1,int(len(b)*.05)),replace=False);p=np.zeros(len(b),bool);p[ix]=pred(vm,single["ids"],single["logic"])[ix]
         rows.append(dict(fold=fold,method="sample",n=len(b),tp=int((p&truth).sum()),fp=int((p&~truth).sum()),fn=int((~p&truth).sum()),tn=int((~p&~truth).sum()),coverage=len(ix)/len(b)))
         protocols.append(dict(fold=fold,model=model,llm_seconds=elapsed,feedback=feedback,chosen=chosen,matched=best,train_n=len(a),test_n=len(b)))
-    result=pd.DataFrame(rows);result.to_csv("berka_validation.csv",index=False)
+    result=pd.DataFrame(rows);result.to_csv(prefix+"_validation.csv",index=False)
     totals=result.groupby("method")[["n","tp","fp","fn","tn"]].sum()
     totals["precision"]=totals.tp/(totals.tp+totals.fp);totals["recall"]=totals.tp/(totals.tp+totals.fn);totals["f1"]=2*totals.tp/(2*totals.tp+totals.fp+totals.fn)
     totals["folds"]=result.groupby("method").size()
-    totals.to_csv("berka_validation_summary.csv")
-    with open("berka_validation_protocol.json","w") as f:json.dump(dict(note="Exploratory five-fold internal validation; dataset previously inspected; not external validation. Loan repayment proxy, not audit violation. Matched search uses same rule family.",indicators=indicators,hashes=hashes,folds=protocols),f,indent=2)
+    totals.to_csv(prefix+"_validation_summary.csv")
+    with open(prefix+"_validation_protocol.json","w") as f:json.dump(dict(note=label+"; loan repayment proxy, not audit violation. Matched search uses same rule family.",indicators=indicators,hashes=hashes,folds=protocols),f,indent=2)
     print("VALIDATION_SUMMARY",totals.to_json(),flush=True)
