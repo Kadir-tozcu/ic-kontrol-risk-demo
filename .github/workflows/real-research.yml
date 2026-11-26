@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - '.github/workflows/real-research.yml'
+      - 'research_real.py'
 permissions:
   contents: read
 jobs:
