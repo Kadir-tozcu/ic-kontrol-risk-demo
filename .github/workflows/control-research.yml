@@ -1,0 +1,29 @@
+name: Expanded real banking controls
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'research_controls.py'
+      - '.github/workflows/control-research.yml'
+permissions:
+  contents: read
+jobs:
+  controls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas==2.2.3 numpy==2.2.6 openai==2.8.1
+      - run: python research_controls.py
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: banking-control-results
+          path: |
+            control_results.csv
+            control_protocol.json
