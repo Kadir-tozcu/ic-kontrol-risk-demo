@@ -1,0 +1,35 @@
+name: Paired credit and hybrid experiments
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/extended-experiments.yml'
+      - 'research_statistics.py'
+      - 'research_spark.py'
+permissions:
+  contents: read
+jobs:
+  credit:
+    strategy:
+      fail-fast: false
+      matrix:
+        dataset: [berka, external]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas==2.2.3 numpy==2.2.6 openai==2.8.1 scikit-learn==1.6.1 scipy==1.15.2
+      - run: python research_${{ matrix.dataset }}.py
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: paired-${{ matrix.dataset }}
+          path: |
+            *_validation*.csv
+            *_validation_protocol.json
+            *_statistics.json
