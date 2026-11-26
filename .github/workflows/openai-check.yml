@@ -1,0 +1,31 @@
+name: OpenAI connectivity check
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/openai-check.yml'
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Verify OpenAI API access
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os, urllib.request, urllib.error
+          key=os.environ.get('OPENAI_API_KEY')
+          if not key:
+              raise SystemExit('SECRET_MISSING')
+          req=urllib.request.Request('https://api.openai.com/v1/models',headers={'Authorization':'Bearer '+key})
+          try:
+              with urllib.request.urlopen(req,timeout=20) as r:
+                  print('OPENAI_AUTH_OK',r.status)
+          except urllib.error.HTTPError as e:
+              raise SystemExit('OPENAI_HTTP_STATUS '+str(e.code))
+          except Exception:
+              raise SystemExit('OPENAI_CONNECTION_FAILED')
+          PY
