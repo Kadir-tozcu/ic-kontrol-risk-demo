@@ -35,6 +35,13 @@ def check(browser,url):
         assert len(records)==4 and all(sum(int(row[k]) for k in ("tp","fp","fn","tn"))==1000 for row in records)
         assert any(row["tp"]=="110" and row["fp"]=="148" for row in records)
         report["steps"].append("External CSV verified")
+        expect(page.get_by_text("Gerçek bankacılık verisi | 9 kontrol senaryosu",exact=True)).to_be_visible(timeout=20000)
+        with page.expect_download(timeout=15000) as controls:
+            page.get_by_role("button",name="Tüm kontrol sonuçları CSV").click()
+        cr=list(csv.DictReader(io.StringIO(controls.value.path().read_text(encoding="utf-8-sig"))))
+        assert len(cr)==36 and len({row["scenario"] for row in cr})==9
+        assert all(sum(int(row[k]) for k in ("tp","fp","fn","tn"))==int(row["n"]) for row in cr)
+        report["steps"].append("36 control results CSV verified")
         report["success"]=True
     except Exception as e:
         report["success"]=False
