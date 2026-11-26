@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/berka-research.yml'
       - 'research_berka.py'
+      - 'research_validation.py'
 permissions:
   contents: read
 jobs:
@@ -16,7 +17,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install pandas==2.2.3 numpy==2.2.6 pymysql==1.1.1 openai==2.8.1
+      - run: pip install pandas==2.2.3 numpy==2.2.6 pymysql==1.1.1 openai==2.8.1 scikit-learn==1.6.1
       - name: Analyze Berka
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -27,3 +28,6 @@ jobs:
           path: |
             berka_loan_results.csv
             berka_protocol.json
+            berka_validation.csv
+            berka_validation_summary.csv
+            berka_validation_protocol.json
