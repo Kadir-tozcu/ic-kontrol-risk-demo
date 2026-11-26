@@ -254,7 +254,7 @@ if now_ts-st.session_state.get("last_activity",now_ts)>security_cfg["idle_timeou
 st.session_state.last_activity=now_ts
 admin=user["role"]=="Yonetici"; editable=user["role"] in ["Yonetici","Inceleyen","Onaylayan"]; rules=get_rules();custom_df=list_custom_rules(active_only=True);custom_records=custom_df.to_dict("records");process_override_df=get_process_rule_overrides()
 organization=get_organization_settings();st.markdown(f"<style>:root{{--blue:{organization['accent_color']}}}</style>",unsafe_allow_html=True)
-names=["Operasyon merkezi","Anlık tarama","Risk panosu","İşlem listesi","Vaka detayı","Süreç merkezi","Veri setleri","Veri kalitesi","Yönetici raporu","Adaptif kontrol","Vaka asistanı","Güvenlik merkezi"]+(["Entegrasyon merkezi","API yönetimi","Senaryo stüdyosu","Kural yönetimi","Sistem yönetimi"] if admin else [])
+names=["Operasyon merkezi","Anlık tarama","Risk panosu","İşlem listesi","Vaka detayı","Süreç merkezi","Veri setleri","Veri kalitesi","Yönetici raporu","Adaptif kontrol","Vaka asistanı","Güvenlik merkezi"]+(["Research Lab","Entegrasyon merkezi","API yönetimi","Senaryo stüdyosu","Kural yönetimi","Sistem yönetimi"] if admin else [])
 nav_icons={"Anlık tarama":"🔍","Operasyon merkezi":"🏠","Risk panosu":"📊","İşlem listesi":"📋","Vaka detayı":"🔎","Süreç merkezi":"🧩","Veri setleri":"🗄️","Veri kalitesi":"✅","Yönetici raporu":"📈","Adaptif kontrol":"🧠","Vaka asistanı":"✨","Güvenlik merkezi":"🔐","Entegrasyon merkezi":"🔌","API yönetimi":"🔑","Senaryo stüdyosu":"🧪","Kural yönetimi":"⚙️","Sistem yönetimi":"🏢"}
 if st.session_state.get("main_navigation") not in names:st.session_state.main_navigation=names[0]
 process_options=["Para Transferleri"]+list(PROCESS_DEFINITIONS)
@@ -348,6 +348,11 @@ with st.container(key="desktop_navigation"):
 with st.container(key="mobile_navigation"):
     st.session_state.mobile_page = page
     st.selectbox("Çalışma ekranı", names, key="mobile_page", on_change=select_mobile_page)
+
+if page=="Research Lab" and admin:
+    from suite.research_lab import render
+    render()
+    st.stop()
 
 active_case_ids=active_df[active_id].astype(str) if active_process=="Para Transferleri" else active_process+":"+active_df[active_id].astype(str)
 active_status_map=cases.set_index("transaction_id")["status"].to_dict() if len(cases) else {};active_df["case_status"]=active_case_ids.map(active_status_map).fillna("Yeni")
