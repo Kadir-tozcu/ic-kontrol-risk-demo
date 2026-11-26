@@ -70,14 +70,23 @@ def render():
     repeats=st.slider("Tekrar sayısı",1,5,3,key="lab_repeats")
     use_ai=st.checkbox("Gerçek LLM çağrısını etkinleştir (API maliyeti doğabilir)",disabled=not api_available(),key="lab_ai")
     if not api_available():st.warning("API anahtarı yok. C modeli çalıştırılamaz; yerel ayrıştırıcı AI olarak raporlanmaz.")
+    all_scales=st.checkbox("Üç veri ölçeğini birlikte test et",value=True,key="lab_all_scales")
     if st.button("Deneyi çalıştır",type="primary",key="lab_run"):
         with st.spinner("Deneyler çalıştırılıyor"):
-            result,rules=benchmark(n,sample,repeats,use_ai)
-            st.session_state["lab_result"]=(result,rules,{"n":n,"sample_pct":sample,"repeats":repeats,"model":model_name() if use_ai else None})
+            frames=[]; rules=[]
+            for scale in ([10000,100000,1000000] if all_scales else [n]):
+                frame,protocol=benchmark(scale,sample,repeats,use_ai)
+                frames.append(frame);rules.extend([dict(item,n=scale) for item in protocol])
+            result=pd.concat(frames,ignore_index=True)
+            st.session_state["lab_result"]=(result,rules,{"scales":[10000,100000,1000000] if all_scales else [n],"sample_pct":sample,"repeats":repeats,"model":model_name() if use_ai else None})
     if "lab_result" in st.session_state:
         result,rules,meta=st.session_state["lab_result"]
         st.json(meta)
         st.dataframe(result,hide_index=True)
+        summary=result.groupby(["n","method"])[["recall","precision","f1","coverage_pct","scan_seconds"]].agg(["mean","std"])
+        st.dataframe(summary)
+        st.line_chart(result.groupby(["n","method"]).scan_seconds.mean().unstack())
+        st.download_button("Özet istatistikler CSV",summary.to_csv().encode("utf-8-sig"),"research_summary.csv","text/csv")
         st.bar_chart(result.groupby("method")[["recall","precision","f1"]].mean())
         st.download_button("Deney sonuçları CSV",result.to_csv(index=False).encode("utf-8-sig"),"research_results.csv","text/csv")
         st.download_button("Deney protokolü ve üretilen kurallar",json.dumps({"settings":meta,"rules":rules},ensure_ascii=False,indent=2),"research_protocol.json","application/json")
@@ -93,11 +102,14 @@ def render():
         if f is not None and st.button("Berka profilini çıkar",key="lab_berka_run"):
             try:
                 start=time.perf_counter()
-                d=pd.read_csv(f,sep=None,engine="python",usecols=lambda c:c.strip().lower() in {"amount","balance","date"})
+                d=pd.read_csv(f,sep=";" if f.name.lower().endswith(".asc") else ",",usecols=lambda c:c.strip().lower() in {"amount","balance","date"})
                 d.columns=[c.strip().lower() for c in d.columns]
                 if not {"amount","balance","date"}.issubset(d.columns):raise ValueError("amount, balance, date sütunları gerekli")
                 a=pd.to_numeric(d.amount,errors="coerce"); b=pd.to_numeric(d.balance,errors="coerce")
                 summary={"rows":len(d),"valid_amount":int(a.notna().sum()),"valid_balance":int(b.notna().sum()),"negative_balance_count":int((b<0).sum()),"amount_median":float(a.median()),"date_min":str(d.date.min()),"date_max":str(d.date.max()),"seconds":time.perf_counter()-start,"sha256":hashlib.sha256(f.getvalue()).hexdigest()}
+                st.session_state["lab_berka_summary"]=summary
+            except Exception as exc:st.error("Berka dosyası işlenemedi: "+type(exc).__name__)
+        if "lab_berka_summary" in st.session_state:
+                summary=st.session_state["lab_berka_summary"]
                 st.json(summary)
                 st.download_button("Berka özetini indir",json.dumps(summary,indent=2),"berka_profile.json","application/json")
-            except Exception as exc:st.error("Berka dosyası işlenemedi: "+type(exc).__name__)
